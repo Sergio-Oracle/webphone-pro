@@ -5,6 +5,7 @@
 
 # Fichiers de sauvegarde
 *-bakup.*
+*-bakup-*
 *.bak
 *.backup
 
