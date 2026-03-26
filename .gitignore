@@ -1,0 +1,16 @@
+# Outils de développement (ne pas partager)
+.vscode/
+.claude/
+*.local.json
+
+# Fichiers de sauvegarde
+*-bakup.*
+*.bak
+*.backup
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
