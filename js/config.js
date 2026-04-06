@@ -1,4 +1,4 @@
-// Configuration SENDT v14.0 (sans E2EE)
+// Configuration SENDT v15.2 (E2EE activé)
 const CONFIG = {
     APP_NAME: 'SENDT',
     APP_VERSION: '1.0',
@@ -36,6 +36,12 @@ const CONFIG = {
         ],
         mapTileUrl: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
         defaultZoom: 15
+    },
+    // ── Chiffrement de bout en bout ──────────────────────────────────────────
+    E2EE: {
+        enabled: true,                   // Activer l'initialisation crypto au login
+        autoEncryptDMs: true,            // Chiffrer automatiquement les nouveaux DMs
+        olmCryptoStoreName: 'sendt:crypto', // Nom du store IndexedDB Olm
     },
     GROUP_CALL: { enabled:true, maxParticipants:8, conferenceType:'mesh' },
     SHARED_NOTES: { enabled:true, maxLength:10000, eventType:'io.sendt.shared_note' },
@@ -100,12 +106,9 @@ const CONFIG = {
     NOTIFICATIONS_MAX: 50,
     LIVEKIT: {
         URL: 'wss://livekit.ec2lt.sn',
-        API_KEY: 'devkey',
-        API_SECRET: 'C1w4u/5lPpAIuKsuqm64qmUWjAd9+7aTpftoT0U5NHI=',
-        TOKEN_ENDPOINT: '/api/connection-details',
-        RECORD_ENDPOINT: '/api/record',
+        TOKEN_ENDPOINT: 'https://telephone.rtn.sn/api/connection-details',
+        RECORD_ENDPOINT: 'https://telephone.rtn.sn/api/record',
         MAX_PARTICIPANTS: 50,
         ENABLE_KRISP: true
     }
 };
-console.log(`✅ config.js v14.0 - ${CONFIG.APP_NAME} ${CONFIG.APP_VERSION}`);

@@ -5,9 +5,53 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>SENDT - Communication Sénégalaise</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-    <link rel="stylesheet" href="css/style.css?v=15.1">
+    <!-- Préconnexions CDN pour réduire la latence DNS+TLS -->
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <link rel="preconnect" href="https://unpkg.com" crossorigin>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+          integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
+    <link rel="stylesheet" href="css/style.css?v=19.8">
+    <style>
+        /* E2EE — Cadenas dans l'en-tête de conversation */
+        .e2ee-lock { font-size:.72rem; color:#25D366; margin-left:5px; vertical-align:middle; cursor:help; }
+        .e2ee-lock.unencrypted { color:#8696A0; }
+        /* E2EE — Indicateur par message */
+        .msg-e2ee-icon { font-size:.55rem; opacity:.6; margin-left:3px; color:#25D366; }
+        .msg-e2ee-icon.error { color:#E31B23; opacity:.9; }
+        /* E2EE — Message de déchiffrement échoué */
+        .msg-decrypt-error { font-style:italic; color:#8696A0; font-size:.82rem; display:flex; align-items:center; gap:5px; }
+        /* E2EE — Emojis de vérification */
+        .e2ee-emoji-grid { display:flex; flex-wrap:wrap; justify-content:center; gap:12px; margin:20px 0; }
+        .e2ee-emoji-item { display:flex; flex-direction:column; align-items:center; gap:4px; width:64px; }
+        .e2ee-emoji { font-size:2rem; }
+        .e2ee-emoji-label { font-size:.65rem; color:#8696A0; text-align:center; }
+        /* E2EE — Code numérique de vérification */
+        .e2ee-decimal { font-size:.9rem; color:#8696A0; text-align:center; margin:8px 0; letter-spacing:2px; }
+        /* E2EE — Section dans Paramètres */
+        .e2ee-device-fingerprint { font-family:monospace; font-size:.78rem; color:#E9EDEF; background:rgba(0,133,63,.08); border:1px solid rgba(0,133,63,.2); border-radius:6px; padding:8px 10px; word-break:break-all; margin-top:4px; }
+        .e2ee-status-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:20px; font-size:.78rem; font-weight:600; }
+        .e2ee-status-badge.active { background:rgba(37,211,102,.15); color:#25D366; border:1px solid rgba(37,211,102,.3); }
+        .e2ee-status-badge.inactive { background:rgba(134,150,160,.1); color:#8696A0; border:1px solid rgba(134,150,160,.2); }
+        .e2ee-section-title { color:#E9EDEF; font-size:.9rem; font-weight:600; margin:20px 0 8px; display:flex; align-items:center; gap:7px; }
+        .e2ee-section-title i { color:#00853F; }
+        .e2ee-section-divider { border:none; border-top:1px solid rgba(255,255,255,.07); margin:18px 0; }
+        .e2ee-backup-info { font-size:.8rem; color:#8696A0; margin-bottom:10px; }
+        .e2ee-device-row { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.05); }
+        .e2ee-device-name { font-size:.85rem; color:#E9EDEF; }
+        .e2ee-device-verified { font-size:.7rem; padding:2px 7px; border-radius:10px; }
+        .e2ee-device-verified.yes { background:rgba(37,211,102,.15); color:#25D366; }
+        .e2ee-device-verified.no  { background:rgba(253,239,66,.1); color:#FDEF42; }
+        /* E2EE — Modal Vérification */
+        #e2ee-verify-modal .modal-content, #e2ee-backup-modal .modal-content { max-width:380px; }
+        .e2ee-verify-intro { font-size:.85rem; color:#8696A0; line-height:1.55; margin-bottom:16px; }
+        .e2ee-verify-actions { display:flex; gap:10px; margin-top:16px; }
+        .e2ee-verify-actions .btn-primary { flex:1; }
+        .btn-danger { padding:10px 20px; background:rgba(227,27,35,.15); color:#E31B23; border:1px solid rgba(227,27,35,.35); border-radius:var(--radius); cursor:pointer; font-size:.9rem; transition:.2s; flex:1; }
+        .btn-danger:hover { background:rgba(227,27,35,.25); }
+    </style>
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#00853F">
     <meta name="mobile-web-app-capable" content="yes">
@@ -550,11 +594,13 @@
                 <div class="form-group">
                     <label for="reg-password"><i class="fas fa-lock"></i> Mot de passe</label>
                     <div class="password-wrapper">
-                        <input type="password" id="reg-password" placeholder="Choisissez un mot de passe" autocomplete="new-password">
+                        <input type="password" id="reg-password" placeholder="Min. 8 caractères, 1 lettre, 1 chiffre" autocomplete="new-password" oninput="_updatePasswordStrength(this.value)">
                         <button type="button" class="toggle-password" onclick="toggleRegPassword()">
                             <i class="fas fa-eye"></i>
                         </button>
                     </div>
+                    <div id="pwd-strength-bar" style="margin-top:6px;height:4px;border-radius:2px;background:rgba(255,255,255,.1);overflow:hidden;"><div id="pwd-strength-fill" style="height:100%;width:0;transition:width .3s,background .3s;border-radius:2px;"></div></div>
+                    <div id="pwd-strength-label" style="font-size:.72rem;color:#8696A0;margin-top:3px;min-height:14px;"></div>
                 </div>
                 <div class="form-group">
                     <label for="reg-confirm"><i class="fas fa-lock"></i> Confirmer le mot de passe</label>
@@ -684,6 +730,8 @@
                     </button>
                     <div class="chat-contact-info">
                         <span id="selected-contact-name" class="contact-name"></span>
+                        <i id="chat-e2ee-lock" class="fas fa-lock e2ee-lock" title="Conversation chiffrée de bout en bout (E2EE)" style="display:none" onclick="showToast('Cette conversation est chiffrée de bout en bout — personne d\'autre ne peut lire vos messages', \'info\')"></i>
+                        <i id="chat-e2ee-lock-open" class="fas fa-lock-open" title="Activer le chiffrement E2EE" style="display:none;font-size:.72rem;color:#FDEF42;margin-left:5px;vertical-align:middle;cursor:pointer;" onclick="toggleRoomEncryption()"></i>
                         <span id="selected-contact-id" class="contact-id"></span>
                     </div>
                     <div class="chat-header-actions">
@@ -932,7 +980,8 @@
         <div class="settings-tabs">
             <button class="settings-tab active" data-tab="devices" onclick="uiController.switchSettingsTab('devices')">Appareils</button>
             <button class="settings-tab" data-tab="sounds" onclick="uiController.switchSettingsTab('sounds')">Sons</button>
-            <button class="settings-tab" data-tab="account" onclick="uiController.switchSettingsTab('account');loadAccountEmail()">Compte</button>
+            <button class="settings-tab" data-tab="account" onclick="uiController.switchSettingsTab('account');loadAccountEmail();loadConnectedDevices()">Compte</button>
+            <button class="settings-tab" data-tab="security" onclick="uiController.switchSettingsTab('security');loadSecuritySettings()"><i class="fas fa-shield-alt" style="margin-right:4px"></i>Sécurité</button>
         </div>
         <div id="devices-panel" class="settings-panel active">
             <div class="form-group"><label><i class="fas fa-video"></i> Caméra</label><select id="camera-select"></select></div>
@@ -987,6 +1036,266 @@
                 <div style="text-align:center;margin-top:10px;">
                     <button type="button" onclick="cancelEmailLink()" class="login-link-btn"><i class="fas fa-times"></i> Annuler</button>
                 </div>
+            </div>
+            <!-- Sessions connectées — liste individuelle avec déconnexion par appareil -->
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid rgba(255,255,255,.07);">
+                <h4 style="color:#E9EDEF;margin:0 0 6px;font-size:.93rem;font-weight:600;display:flex;align-items:center;gap:8px;">
+                    <i class="fas fa-mobile-alt" style="color:#00853F"></i> Appareils connectés
+                    <button type="button" onclick="loadConnectedDevices()" title="Actualiser" style="margin-left:auto;background:none;border:none;color:#8696A0;cursor:pointer;font-size:.85rem;"><i class="fas fa-sync-alt" id="devices-refresh-icon"></i></button>
+                </h4>
+                <p style="color:#8696A0;font-size:.78rem;line-height:1.5;margin-bottom:10px;">Tous les appareils où votre compte est actif. Déconnectez ceux que vous ne reconnaissez pas.</p>
+                <div id="connected-devices-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
+                    <div style="color:#8696A0;font-size:.82rem;text-align:center;padding:10px;"><i class="fas fa-spinner fa-spin"></i> Chargement...</div>
+                </div>
+            </div>
+
+            <!-- Déconnexion de tous les appareils -->
+            <div style="padding-top:12px;border-top:1px solid rgba(255,255,255,.07);">
+                <h4 style="color:#E9EDEF;margin:0 0 8px;font-size:.93rem;font-weight:600;display:flex;align-items:center;gap:8px;">
+                    <i class="fas fa-shield-alt" style="color:#E31B23"></i> Sécurité de la session
+                </h4>
+                <p style="color:#8696A0;font-size:.82rem;line-height:1.55;margin-bottom:14px;">
+                    Si vous pensez que votre compte est compromis ou que vous avez perdu un appareil, déconnectez toutes vos sessions actives.
+                </p>
+                <button type="button" id="logout-all-btn" onclick="logoutAllDevices()" class="btn-secondary" style="width:100%;border-color:rgba(227,27,35,.4);color:#E31B23;">
+                    <i class="fas fa-sign-out-alt"></i> Déconnecter tous mes appareils
+                </button>
+                <div id="logout-all-error" class="error-message" style="margin-top:8px;"></div>
+            </div>
+        </div>
+        <!-- Sécurité E2EE -->
+        <div id="security-panel" class="settings-panel">
+            <!-- Statut global E2EE -->
+            <div style="margin-bottom:16px;">
+                <span id="e2ee-global-status" class="e2ee-status-badge inactive"><i class="fas fa-spinner fa-spin"></i> Chargement...</span>
+            </div>
+
+            <!-- Appareil courant -->
+            <div class="e2ee-section-title"><i class="fas fa-mobile-alt"></i> Mon appareil</div>
+            <div class="form-group" style="margin-bottom:10px;">
+                <label style="font-size:.78rem;color:#8696A0;">Identifiant de l'appareil</label>
+                <code id="e2ee-device-id" style="font-size:.82rem;color:#E9EDEF;display:block;margin-top:4px;">—</code>
+            </div>
+            <div class="form-group">
+                <label style="font-size:.78rem;color:#8696A0;">Empreinte de sécurité (Ed25519)</label>
+                <div id="e2ee-device-fingerprint" class="e2ee-device-fingerprint">—</div>
+            </div>
+            <p style="font-size:.75rem;color:#8696A0;margin-top:4px;line-height:1.5;">Comparez cette empreinte avec celle visible sur vos autres appareils pour vous assurer que personne n'intercepte votre communication.</p>
+            <div id="e2ee-padlock-info" style="display:none;margin-top:10px;padding:9px 12px;background:rgba(0,133,63,.07);border:1px solid rgba(0,133,63,.2);border-radius:8px;font-size:.78rem;color:#8696A0;line-height:1.55;">
+                <i class="fas fa-lock" style="color:#25D366;margin-right:5px;"></i>
+                Le <strong style="color:#E9EDEF">cadenas vert</strong> apparaît uniquement sur les conversations chiffrées de bout en bout.
+                Les anciennes conversations non chiffrées restent lisibles mais sans cadenas.
+                Les nouvelles conversations privées sont chiffrées automatiquement.
+            </div>
+
+            <hr class="e2ee-section-divider">
+
+            <!-- Sauvegarde des clés -->
+            <div class="e2ee-section-title"><i class="fas fa-cloud-upload-alt"></i> Sauvegarde des clés E2EE</div>
+            <div id="e2ee-backup-info" class="e2ee-backup-info">Vérification...</div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <button class="btn-secondary" onclick="showKeyBackupSetup()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-key"></i> Configurer
+                </button>
+                <button class="btn-secondary" onclick="showKeyBackupRestore()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-cloud-download-alt"></i> Restaurer
+                </button>
+            </div>
+
+            <hr class="e2ee-section-divider">
+
+            <!-- Export / Import de clés -->
+            <div class="e2ee-section-title"><i class="fas fa-exchange-alt"></i> Export / Import des clés</div>
+            <p class="e2ee-backup-info">Sauvegardez manuellement vos clés de session sur votre appareil.</p>
+            <div style="display:flex;gap:8px;">
+                <button class="btn-secondary" onclick="exportSessionKeys()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-download"></i> Exporter (.json)
+                </button>
+                <button class="btn-secondary" onclick="triggerImportKeys()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-upload"></i> Importer
+                </button>
+            </div>
+            <input type="file" id="import-keys-file" accept=".json" style="display:none" onchange="importSessionKeys()">
+
+            <hr class="e2ee-section-divider">
+
+            <!-- Cross-signing / Vérification inter-appareils -->
+            <div class="e2ee-section-title"><i class="fas fa-check-double"></i> Vérification croisée</div>
+            <div id="e2ee-crosssign-status" class="e2ee-backup-info">Vérification...</div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <button class="btn-secondary" onclick="showCrossSigningSetup()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-cog"></i> Configurer
+                </button>
+                <button class="btn-secondary" onclick="showVerifyOtherDevice()" style="flex:1;font-size:.8rem;padding:9px;">
+                    <i class="fas fa-user-check"></i> Vérifier un appareil
+                </button>
+            </div>
+            <p style="font-size:.74rem;color:#8696A0;margin-top:8px;line-height:1.5;">La vérification croisée permet à vos contacts de confirmer que vos messages viennent bien de vous.</p>
+
+            <hr class="e2ee-section-divider">
+
+            <!-- Chiffrement automatique DMs -->
+            <div class="e2ee-section-title"><i class="fas fa-comments"></i> Messages privés</div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="auto-encrypt-dms" onchange="toggleAutoEncryptDMs(this.checked)">
+                    Chiffrer automatiquement les nouveaux messages privés
+                </label>
+                <p style="font-size:.74rem;color:#8696A0;margin-top:6px;line-height:1.5;">Activé par défaut comme dans Element. S'applique uniquement aux nouvelles conversations.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal : Vérification SAS (emojis) -->
+<div id="e2ee-verify-modal" class="modal">
+    <div class="modal-content" style="max-width:380px;">
+        <div class="modal-header">
+            <h3 id="e2ee-verify-title"><i class="fas fa-shield-alt"></i> Vérifier l'identité</h3>
+            <button class="close-btn" onclick="cancelSASVerification()"><i class="fas fa-times"></i></button>
+        </div>
+        <div style="padding:20px;">
+            <!-- Étape 1 : accepter la demande entrante -->
+            <div id="e2ee-verify-step-accept">
+                <p class="e2ee-verify-intro">Un autre appareil demande à être vérifié. Assurez-vous que vous contrôlez cet appareil avant d'accepter.</p>
+                <div class="e2ee-verify-actions">
+                    <button class="btn-primary" onclick="acceptVerificationRequest()"><i class="fas fa-check"></i> Accepter</button>
+                    <button class="btn-danger" onclick="cancelSASVerification()"><i class="fas fa-times"></i> Refuser</button>
+                </div>
+            </div>
+            <!-- Étape 2 : comparer les emojis -->
+            <div id="e2ee-verify-step-compare" class="hidden">
+                <p class="e2ee-verify-intro">Comparez ces emojis avec ceux affichés sur l'autre appareil. S'ils correspondent exactement, confirmez.</p>
+                <div id="e2ee-emoji-container" class="e2ee-emoji-grid"></div>
+                <div id="e2ee-decimal-code" class="e2ee-decimal"></div>
+                <div class="e2ee-verify-actions">
+                    <button class="btn-primary" onclick="confirmSASVerification()"><i class="fas fa-check-double"></i> Ils correspondent</button>
+                    <button class="btn-danger" onclick="cancelSASVerification()"><i class="fas fa-times"></i> Ne correspondent pas</button>
+                </div>
+            </div>
+            <!-- Étape 3 : en attente -->
+            <div id="e2ee-verify-step-waiting" class="hidden">
+                <p class="e2ee-verify-intro" style="text-align:center;"><i class="fas fa-spinner fa-spin" style="margin-right:8px;color:#00853F"></i>En attente de l'autre appareil...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal : Restauration des clés E2EE sur un nouvel appareil (comme Element) -->
+<div id="new-device-restore-modal" class="modal">
+    <div class="modal-content" style="max-width:390px;">
+        <div class="modal-header">
+            <h3><i class="fas fa-mobile-alt" style="color:#00853F"></i> Nouvel appareil détecté</h3>
+        </div>
+        <div style="padding:20px;">
+            <p style="font-size:.88rem;color:#E9EDEF;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+                <i class="fas fa-lock" style="color:#25D366"></i> Restaurer vos messages chiffrés
+            </p>
+            <p style="font-size:.83rem;color:#8696A0;line-height:1.6;margin-bottom:18px;">
+                Vous avez des messages chiffrés sauvegardés sur le serveur SENDT.<br>
+                Entrez votre <strong style="color:#E9EDEF">phrase secrète de sauvegarde</strong> pour les déchiffrer sur cet appareil.
+            </p>
+            <div class="form-group">
+                <label for="new-device-restore-passphrase"><i class="fas fa-key"></i> Phrase secrète de sauvegarde</label>
+                <input type="password" id="new-device-restore-passphrase" placeholder="Votre phrase secrète" autocomplete="current-password">
+            </div>
+            <div id="new-device-restore-error" class="error-message"></div>
+            <button id="new-device-restore-btn" class="btn-primary" onclick="confirmNewDeviceRestore()" style="width:100%;margin-top:8px;">
+                <i class="fas fa-cloud-download-alt"></i> Restaurer mes messages
+            </button>
+            <div style="text-align:center;margin-top:12px;display:flex;justify-content:center;gap:16px;">
+                <button type="button" onclick="showKeyBackupRestore();closeModal('new-device-restore-modal')" style="background:none;border:none;color:#8696A0;font-size:.8rem;cursor:pointer;">
+                    <i class="fas fa-key"></i> Utiliser une clé de récupération
+                </button>
+                <button type="button" onclick="skipNewDeviceRestore()" style="background:none;border:none;color:#8696A0;font-size:.8rem;cursor:pointer;">Plus tard</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal : Configuration Cross-Signing (première connexion E2EE — comme Element) -->
+<div id="e2ee-crosssign-modal" class="modal">
+    <div class="modal-content" style="max-width:400px;">
+        <div class="modal-header">
+            <h3><i class="fas fa-shield-alt" style="color:#00853F"></i> Configurer la sécurité E2EE</h3>
+        </div>
+        <div style="padding:20px;">
+            <div id="e2ee-cs-step-intro">
+                <p style="font-size:.85rem;color:#8696A0;line-height:1.6;margin-bottom:16px;">
+                    Pour chiffrer vos conversations et vérifier vos appareils comme dans Element, SENDT doit configurer votre <strong style="color:#E9EDEF">clé de sécurité maîtresse</strong>.
+                </p>
+                <p style="font-size:.85rem;color:#8696A0;line-height:1.6;margin-bottom:20px;">
+                    Cette clé permet de vérifier que tous vos appareils appartiennent bien à vous, et de restaurer vos messages sur un nouvel appareil.
+                </p>
+                <div class="form-group">
+                    <label for="e2ee-cs-passphrase"><i class="fas fa-lock"></i> Phrase secrète de sécurité</label>
+                    <input type="password" id="e2ee-cs-passphrase" placeholder="Mémorisez-la — elle ne peut pas être récupérée" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label for="e2ee-cs-passphrase2"><i class="fas fa-lock"></i> Confirmer</label>
+                    <input type="password" id="e2ee-cs-passphrase2" placeholder="Confirmer la phrase secrète" autocomplete="new-password">
+                </div>
+                <div id="e2ee-cs-error" class="error-message"></div>
+                <button id="e2ee-cs-setup-btn" class="btn-primary" onclick="confirmCrossSigningSetup()" style="width:100%;margin-top:8px;">
+                    <i class="fas fa-key"></i> Configurer la sécurité
+                </button>
+                <div style="text-align:center;margin-top:12px;">
+                    <button type="button" onclick="skipCrossSigningSetup()" style="background:none;border:none;color:#8696A0;font-size:.8rem;cursor:pointer;">Passer pour l'instant</button>
+                </div>
+            </div>
+            <!-- Étape 2 : afficher la clé de récupération -->
+            <div id="e2ee-cs-step-key" class="hidden">
+                <p style="font-size:.85rem;color:#25D366;font-weight:600;margin-bottom:12px;"><i class="fas fa-check-circle"></i> Sécurité configurée !</p>
+                <p style="font-size:.83rem;color:#8696A0;line-height:1.6;margin-bottom:14px;">
+                    Voici votre <strong style="color:#E9EDEF">clé de récupération</strong>. Notez-la dans un endroit sûr.
+                </p>
+                <div id="e2ee-cs-recovery-key" style="font-family:monospace;font-size:.8rem;background:rgba(0,133,63,.08);border:1px solid rgba(0,133,63,.3);border-radius:8px;padding:12px;word-break:break-all;color:#E9EDEF;margin-bottom:16px;"></div>
+                <button class="btn-secondary" onclick="_copyRecoveryKey()" style="width:100%;margin-bottom:8px;"><i class="fas fa-copy"></i> Copier la clé</button>
+                <button class="btn-primary" onclick="closeModal('e2ee-crosssign-modal')" style="width:100%;"><i class="fas fa-check"></i> J'ai sauvegardé ma clé</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal : Sauvegarde des clés E2EE -->
+<div id="e2ee-backup-modal" class="modal">
+    <div class="modal-content" style="max-width:380px;">
+        <div class="modal-header">
+            <h3 id="e2ee-backup-modal-title"><i class="fas fa-key"></i> Sauvegarde des clés</h3>
+            <button class="close-btn" onclick="closeModal('e2ee-backup-modal')"><i class="fas fa-times"></i></button>
+        </div>
+        <div style="padding:20px;">
+            <!-- Mode : Configurer -->
+            <div id="e2ee-backup-mode-setup">
+                <p style="font-size:.83rem;color:#8696A0;line-height:1.55;margin-bottom:16px;">
+                    Créez une sauvegarde chiffrée de vos clés sur le serveur. En cas de perte de votre appareil, vous pourrez récupérer vos messages avec ce mot de passe.
+                </p>
+                <div class="form-group">
+                    <label for="e2ee-backup-passphrase"><i class="fas fa-lock"></i> Mot de passe de sauvegarde</label>
+                    <input type="password" id="e2ee-backup-passphrase" placeholder="Au moins 8 caractères" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label for="e2ee-backup-passphrase2"><i class="fas fa-lock"></i> Confirmer le mot de passe</label>
+                    <input type="password" id="e2ee-backup-passphrase2" placeholder="Confirmez" autocomplete="new-password">
+                </div>
+                <div id="e2ee-backup-error" class="error-message"></div>
+                <button id="e2ee-setup-backup-btn" class="btn-primary" onclick="confirmSetupKeyBackup()" style="width:100%;margin-top:8px;">
+                    <i class="fas fa-cloud-upload-alt"></i> Créer la sauvegarde
+                </button>
+            </div>
+            <!-- Mode : Restaurer -->
+            <div id="e2ee-backup-mode-restore" class="hidden">
+                <p style="font-size:.83rem;color:#8696A0;line-height:1.55;margin-bottom:16px;">
+                    Entrez le mot de passe que vous avez défini lors de la configuration de la sauvegarde pour récupérer vos clés de chiffrement.
+                </p>
+                <div class="form-group">
+                    <label for="e2ee-restore-passphrase"><i class="fas fa-lock"></i> Mot de passe de sauvegarde</label>
+                    <input type="password" id="e2ee-restore-passphrase" placeholder="Votre mot de passe de sauvegarde" autocomplete="current-password">
+                </div>
+                <div id="e2ee-restore-error" class="error-message"></div>
+                <button id="e2ee-restore-backup-btn" class="btn-primary" onclick="confirmRestoreKeyBackup()" style="width:100%;margin-top:8px;">
+                    <i class="fas fa-cloud-download-alt"></i> Restaurer les clés
+                </button>
             </div>
         </div>
     </div>
@@ -1044,18 +1353,70 @@
 <div id="connection-indicator" class="connection-indicator idle"></div>
 
 <!-- ═══════════════ SCRIPTS ═══════════════ -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/matrix-js-sdk/dist/browser-matrix.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"></script>
+<!-- Olm WASM — requis pour E2EE (doit précéder matrix-js-sdk) -->
+<script defer src="/vendor/olm.js"
+        integrity="sha384-Ao1frDvCPm1zamhmctmtP6uFtimAzguWVYtzOEjREKmvlpPs5i3LyMFw5MwDMcPy" crossorigin="anonymous"></script>
+<!-- Modal : déconnexion d'un appareil spécifique -->
+<div id="disconnect-device-modal" class="modal">
+    <div class="modal-content" style="max-width:380px;">
+        <div class="modal-header">
+            <h3><i class="fas fa-sign-out-alt" style="color:#E31B23"></i> Déconnecter l'appareil</h3>
+            <button class="close-btn" onclick="closeModal('disconnect-device-modal')"><i class="fas fa-times"></i></button>
+        </div>
+        <div style="padding:20px;">
+            <p style="font-size:.85rem;color:#8696A0;margin-bottom:16px;">
+                Pour déconnecter <strong id="disconnect-device-name" style="color:#E9EDEF;"></strong>, entrez votre mot de passe.
+            </p>
+            <input type="hidden" id="disconnect-device-id">
+            <div class="form-group">
+                <label for="disconnect-device-password"><i class="fas fa-lock"></i> Mot de passe</label>
+                <input type="password" id="disconnect-device-password" placeholder="Votre mot de passe" autocomplete="current-password" onkeypress="if(event.key==='Enter')confirmDisconnectDevice()">
+            </div>
+            <div id="disconnect-device-error" class="error-message"></div>
+            <div style="display:flex;gap:10px;margin-top:16px;">
+                <button class="btn-secondary" onclick="closeModal('disconnect-device-modal')" style="flex:1;">Annuler</button>
+                <button id="disconnect-device-confirm-btn" onclick="confirmDisconnectDevice()" class="btn-danger" style="flex:1;"><i class="fas fa-sign-out-alt"></i> Déconnecter</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal : double connexion détectée (comme Element/WhatsApp) -->
+<div id="multi-session-modal" class="modal">
+    <div class="modal-content" style="max-width:400px;">
+        <div class="modal-header">
+            <h3><i class="fas fa-exclamation-triangle" style="color:#FDEF42"></i> Connexion simultanée</h3>
+        </div>
+        <div style="padding:20px;">
+            <p style="font-size:.85rem;color:#8696A0;line-height:1.6;margin-bottom:12px;">
+                Votre compte est connecté sur <strong id="other-sessions-count" style="color:#E9EDEF;"></strong> autre(s) appareil(s) en ce moment.
+                Comme dans Element et WhatsApp, un seul appareil actif est recommandé.
+            </p>
+            <div id="other-devices-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px;max-height:180px;overflow-y:auto;"></div>
+            <div style="display:flex;gap:10px;">
+                <button class="btn-secondary" onclick="closeModal('multi-session-modal')" style="flex:1;">Garder tout</button>
+                <button class="btn-danger" onclick="disconnectOtherSessions()" style="flex:1;"><i class="fas fa-sign-out-alt"></i> Déconnecter les autres</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- defer : téléchargement parallèle, exécution dans l'ordre après le parsing HTML (améliore FCP) -->
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
+<script defer src="js/browser-matrix.min.js?v=19.8"
+        integrity="sha384-bKCqbmbZQrhDkyovaon2gGvpf5eQBmLUv4V6hOMmlYgPx08CPdiTyOYxtKdo49Wx" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"
+        integrity="sha384-8MchKu+uhKf1LR8KGk472KudVHw8lg9vmXj/XW6mPzWLSXlVTlnW/+oJixUtGYbX" crossorigin="anonymous"></script>
 <!--
     ✅ jose SUPPRIMÉ : était en ESModule (export) → "Unexpected token 'export'"
     La génération JWT LiveKit est faite nativement via crypto.subtle dans webrtc-manager.js
 -->
-<script src="js/config.js?v=15.1"></script>
-<script src="js/utils.js?v=15.1"></script>
-<script src="js/matrix-client.js?v=15.1"></script>
-<script src="js/webrtc-manager.js?v=15.1"></script>
-<script src="js/ui-controller.js?v=15.1"></script>
-<script src="js/app.js?v=15.1"></script>
+<script defer src="js/config.js?v=19.8"></script>
+<script defer src="js/utils.js?v=19.8"></script>
+<script defer src="js/matrix-client.js?v=19.8"></script>
+<script defer src="js/webrtc-manager.js?v=19.8"></script>
+<script defer src="js/ui-controller.js?v=19.8"></script>
+<script defer src="js/app.js?v=19.8"></script>
 </body>
 </html>

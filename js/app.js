@@ -3,7 +3,7 @@
 // ✅ acceptInvitation / declineInvitation globaux
 // ✅ toggleEphemeralMenu global
 // ✅ Toutes les fonctions globales nécessaires
-console.log('SENDT v14.2 démarrage...');
+
 let isLoggedIn = false;
 
 /** Transition depuis la landing page vers le flux de connexion */
@@ -12,7 +12,26 @@ function launchApp() {
     document.getElementById('login-screen')?.classList.add('active');
 }
 
+// ── Initialisation Olm (WASM pour E2EE) ──────────────────────────────────────
+async function initOlm() {
+    if (!window.Olm) return false;
+    try {
+        await window.Olm.init({ locateFile: () => '/vendor/olm.wasm' });
+        return true;
+    } catch(e) {
+        console.warn('[E2EE] Olm init échoué:', e.message);
+        return false;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    // Supprimer l'ancien username en clair s'il existe encore (migration sécurité M3)
+    localStorage.removeItem('username');
+    // Initialiser Olm pour E2EE
+    initOlm().then(ok => {
+        if (ok) console.log('[E2EE] ✅ Olm WASM prêt');
+    });
+
     // Forcer le reset de tous les écrans au chargement (évite le spinner bloqué après refresh)
     ['login-screen', 'app-screen', 'loading-screen', 'call-screen'].forEach(id => {
         document.getElementById(id)?.classList.remove('active');
@@ -90,6 +109,40 @@ function switchLoginMode(mode) {
     }
 }
 
+// ── Indicateur visuel de force du mot de passe (L3) ──
+function _updatePasswordStrength(pass) {
+    const fill  = document.getElementById('pwd-strength-fill');
+    const label = document.getElementById('pwd-strength-label');
+    if (!fill || !label) return;
+    let score = 0;
+    if (pass.length >= 8)        score++;
+    if (/[a-z]/.test(pass))      score++;
+    if (/[0-9]/.test(pass))      score++;
+    if (/[A-Z]/.test(pass))      score++;
+    if (/[^a-zA-Z0-9]/.test(pass)) score++;
+    const levels = [
+        { pct: '0%',   color: 'transparent', text: '' },
+        { pct: '25%',  color: '#E31B23',      text: 'Trop faible' },
+        { pct: '50%',  color: '#ffa726',      text: 'Faible' },
+        { pct: '75%',  color: '#FDEF42',      text: 'Moyen' },
+        { pct: '90%',  color: '#25D366',      text: 'Fort' },
+        { pct: '100%', color: '#00853F',      text: 'Très fort' },
+    ];
+    const l = levels[Math.min(score, 5)];
+    fill.style.width = pass.length ? l.pct : '0%';
+    fill.style.background = l.color;
+    label.textContent = pass.length ? l.text : '';
+    label.style.color = l.color;
+}
+
+// ── Validation force du mot de passe (L3) ──
+function _validatePassword(pass) {
+    if (!pass || pass.length < 8)          return 'Le mot de passe doit contenir au moins 8 caractères.';
+    if (!/[a-z]/.test(pass))               return 'Le mot de passe doit contenir au moins une lettre minuscule.';
+    if (!/[0-9]/.test(pass))               return 'Le mot de passe doit contenir au moins un chiffre.';
+    return null; // valide
+}
+
 // ── Inscription ──
 async function submitRegister() {
     const btn = document.getElementById('register-btn');
@@ -103,6 +156,8 @@ async function submitRegister() {
     if (!username) { err.textContent = 'Veuillez saisir un identifiant.'; err.classList.add('show'); return; }
     if (!/^[a-z0-9_\-.]+$/.test(username)) { err.textContent = 'Identifiant invalide. Lettres minuscules, chiffres, - ou _ uniquement.'; err.classList.add('show'); return; }
     if (!pass) { err.textContent = 'Veuillez saisir un mot de passe.'; err.classList.add('show'); return; }
+    const pwdErr = _validatePassword(pass);
+    if (pwdErr) { err.textContent = pwdErr; err.classList.add('show'); return; }
     if (pass !== confirm) { err.textContent = 'Les mots de passe ne correspondent pas.'; err.classList.add('show'); return; }
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Création...';
     const result = await matrixManager.register(CONFIG.DEFAULT_HOMESERVER, username, pass);
@@ -148,6 +203,8 @@ async function submitPasswordReset() {
     const newPwd = document.getElementById('forgot-new-pwd')?.value || '';
     err.textContent = ''; err.classList.remove('show');
     if (!newPwd) { err.textContent = 'Veuillez saisir un nouveau mot de passe.'; err.classList.add('show'); return; }
+    const pwdErr2 = _validatePassword(newPwd);
+    if (pwdErr2) { err.textContent = pwdErr2; err.classList.add('show'); return; }
     if (!_forgotSid || !_forgotSecret) { err.textContent = 'Session expirée. Recommencez depuis le début.'; err.classList.add('show'); return; }
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Mise à jour...';
     const result = await matrixManager.submitNewPassword(CONFIG.DEFAULT_HOMESERVER, _forgotSid, _forgotSecret, newPwd);
@@ -163,8 +220,6 @@ async function submitPasswordReset() {
 
 function checkSavedCredentials() {
     if (localStorage.getItem('rememberMe') === 'true') {
-        const un = localStorage.getItem('username');
-        if (un) { const el = document.getElementById('username'); if (el) el.value = un; }
         const rm = document.getElementById('remember-me'); if (rm) rm.checked = true;
     }
 }
@@ -200,8 +255,8 @@ document.getElementById('login-form')?.addEventListener('submit', async (e) => {
         const r = await matrixManager.login(hs, un, pw);
         clearInterval(stepTimer);
         if (r.success) {
-            if (rm) { localStorage.setItem('rememberMe', 'true'); localStorage.setItem('username', un); }
-            else { localStorage.removeItem('rememberMe'); localStorage.removeItem('username'); }
+            if (rm) { localStorage.setItem('rememberMe', 'true'); }
+            else { localStorage.removeItem('rememberMe'); }
             const p = matrixManager.getUserProfile();
             uiController.updateUserProfile(r.userId, p.displayname || un);
             uiController._updateSidebarAvatar();
@@ -212,6 +267,10 @@ document.getElementById('login-form')?.addEventListener('submit', async (e) => {
                 isLoggedIn = true;
                 showToast('Connexion réussie !', 'success');
                 uiController.renderCallHistory();
+                // E2EE : vérifier la sauvegarde des clés et les demandes de vérification
+                _initE2EEAfterLogin();
+                // Détection de double connexion (comme Element / WhatsApp)
+                setTimeout(() => checkMultipleSessions(), 3000);
                 // Vérifier si on revient d'un lien de validation email
                 if (sessionStorage.getItem('_pendingEmailConfirm')) {
                     sessionStorage.removeItem('_pendingEmailConfirm');
@@ -284,8 +343,9 @@ async function requestEmailLink() {
         _emailLinkSid = result.sid;
         _emailLinkSecret = result.clientSecret;
         _emailLinkAddress = email;
-        sessionStorage.setItem('_emailLinkSid', result.sid);
-        sessionStorage.setItem('_emailLinkSecret', result.clientSecret);
+        // Stocker uniquement l'adresse (non-sensible) pour pré-remplir en cas de rechargement.
+        // Le SID et le clientSecret NE sont PAS stockés : en cas de rechargement de page,
+        // l'utilisateur devra renvoyer le lien (flux de 30 secondes).
         sessionStorage.setItem('_emailLinkAddress', email);
         document.getElementById('account-email-form').classList.add('hidden');
         document.getElementById('account-email-verify').classList.remove('hidden');
@@ -298,12 +358,11 @@ async function confirmEmailLink() {
     const btn = document.getElementById('account-email-confirm-btn');
     const errEl = document.getElementById('account-confirm-error');
     if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
-    // Restaurer depuis sessionStorage si la page a été rechargée (retour depuis le lien email)
-    if (!_emailLinkSid) _emailLinkSid = sessionStorage.getItem('_emailLinkSid');
-    if (!_emailLinkSecret) _emailLinkSecret = sessionStorage.getItem('_emailLinkSecret');
+    // Les tokens de session (SID, secret) sont en mémoire uniquement — jamais en Storage.
+    // Si la page a été rechargée, les variables mémoire sont nulles : on redemande l'envoi.
     if (!_emailLinkAddress) _emailLinkAddress = sessionStorage.getItem('_emailLinkAddress');
     if (!_emailLinkSid || !_emailLinkSecret) {
-        showToast('Session expirée. Recommencez la liaison email.', 'error');
+        showToast('Session expirée. Renvoyez le lien de validation.', 'error');
         cancelEmailLink();
         return;
     }
@@ -320,8 +379,6 @@ async function confirmEmailLink() {
         document.getElementById('account-email-current').style.display = 'block';
         document.getElementById('account-email-form').classList.add('hidden');
         showToast('Email associé avec succès !', 'success');
-        sessionStorage.removeItem('_emailLinkSid');
-        sessionStorage.removeItem('_emailLinkSecret');
         sessionStorage.removeItem('_emailLinkAddress');
     } else if (result.needsPassword) {
         // Le serveur exige le mot de passe pour valider — afficher le champ
@@ -336,8 +393,6 @@ async function confirmEmailLink() {
 
 function cancelEmailLink() {
     _emailLinkSid = null; _emailLinkSecret = null; _emailLinkAddress = null;
-    sessionStorage.removeItem('_emailLinkSid');
-    sessionStorage.removeItem('_emailLinkSecret');
     sessionStorage.removeItem('_emailLinkAddress');
     document.getElementById('account-email-verify')?.classList.add('hidden');
     document.getElementById('account-email-form')?.classList.remove('hidden');
@@ -363,17 +418,42 @@ function logout() {
         matrixManager.logout();
         webrtcManager.cleanup();
         isLoggedIn = false;
+        // Purger toutes les données de session de l'ancien compte
+        uiController.contacts = []; uiController.groups = []; uiController.channels = [];
+        uiController.chatMessages = {}; uiController.currentContact = null;
+        uiController._readReceipts = {}; uiController._unreadCounts = {};
+        const cl = document.getElementById('contacts-list'); if (cl) cl.innerHTML = '';
+        const ch = document.getElementById('channels-list'); if (ch) ch.innerHTML = '';
+        document.getElementById('group-mgmt-bar')?.remove();
+        document.getElementById('contact-view')?.classList.add('hidden');
+        document.getElementById('welcome-screen')?.classList.remove('hidden');
+        document.getElementById('messages-container') && (document.getElementById('messages-container').innerHTML = '');
         // Réinitialiser l'UI sans recharger la page
         ['app-screen','call-screen','loading-screen'].forEach(id => document.getElementById(id)?.classList.remove('active'));
         const ls = document.getElementById('login-screen'); if (ls) ls.classList.add('active');
-        // Vider les champs sauf si rememberMe
-        if (localStorage.getItem('rememberMe') !== 'true') {
-            const u = document.getElementById('username'); if (u) u.value = '';
-        }
+        // Toujours vider le champ username à la déconnexion
+        const u = document.getElementById('username'); if (u) u.value = '';
         const pw = document.getElementById('password'); if (pw) pw.value = '';
         const err = document.getElementById('login-error'); if (err) { err.textContent = ''; err.classList.remove('show'); }
         const btn = document.getElementById('login-btn'); if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Se connecter'; }
         showToast('Déconnecté', 'info');
+    }
+}
+
+async function logoutAllDevices() {
+    const btn = document.getElementById('logout-all-btn');
+    const errEl = document.getElementById('logout-all-error');
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    if (!confirm('Déconnecter TOUS vos appareils ? Vous devrez vous reconnecter partout.')) return;
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Déconnexion...';
+    const result = await matrixManager.logoutAllDevices();
+    if (result.success) {
+        closeModal('settings-modal');
+        logout();
+    } else {
+        btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Déconnecter tous mes appareils';
+        if (errEl) { errEl.textContent = result.error; errEl.classList.add('show'); }
+        showToast(result.error, 'error');
     }
 }
 
@@ -794,4 +874,754 @@ function _lpInitMockupChat() {
     else tryInit();
 })();
 
-console.log(`✅ app.js v14.3 - ${CONFIG.APP_NAME} ${CONFIG.APP_VERSION}`);
+// ═══════════════════════════════════════════════════════════════════════
+//  E2EE — Chiffrement de bout en bout (comme Element)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Initialisation post-login : vérifie le backup et écoute les vérifications entrantes
+async function _initE2EEAfterLogin() {
+    if (!matrixManager.cryptoEnabled) return;
+    // Écouter les demandes de vérification entrantes
+    window.addEventListener('e2ee-verification-request', (e) => {
+        _handleIncomingVerificationRequest(e.detail.request);
+    }, { once: false });
+    // Mettre à jour le cadenas quand un salon est chiffré (changement d'état en temps réel)
+    window.addEventListener('room-encryption-changed', _updateE2EELockIcon);
+    // Mettre à jour le cadenas dans le header selon la conv courante
+    window.addEventListener('contact-selected', _updateE2EELockIcon);
+    // Décryptage tardif : mettre à jour les messages affichés en erreur quand les clés arrivent
+    window.addEventListener('message-decrypted-late', (e) => {
+        const { roomId, eventId, message } = e.detail;
+        if (!uiController?.chatMessages?.[roomId]) return;
+        const idx = uiController.chatMessages[roomId].findIndex(m => m.eventId === eventId);
+        if (idx === -1 || !uiController.chatMessages[roomId][idx].decryptError) return;
+        uiController.chatMessages[roomId][idx] = message;
+        if (uiController.currentContact?.roomId === roomId) uiController.renderMessages(roomId);
+    });
+
+    // Détection nouvel appareil : si une sauvegarde existe et que cet appareil n'a pas encore restauré
+    setTimeout(async () => {
+        const userId = matrixManager.userId;
+        const deviceId = matrixManager.client?.getDeviceId?.();
+        const restoredFlag = `sendt_backup_restored_${userId}_${deviceId}`;
+        const backupInfo = await matrixManager.getKeyBackupInfo();
+        if (backupInfo && !localStorage.getItem(restoredFlag)) {
+            // Nouvel appareil avec sauvegarde sur le serveur → proposer la restauration des clés
+            setTimeout(() => _showNewDeviceRestorePrompt(), 1800);
+        } else if (!backupInfo) {
+            // Aucune sauvegarde configurée — suggestion discrète
+            setTimeout(() => showToast('💡 Configurez la sauvegarde E2EE dans Paramètres › Sécurité', 'info'), 5000);
+        } else {
+            // Sauvegarde déjà restaurée sur cet appareil — activer silencieusement
+            await matrixManager.enableExistingKeyBackup();
+        }
+        // Appliquer le réglage auto-chiffrement DM depuis les préférences
+        // NE PAS écraser le défaut true si l'utilisateur n'a jamais touché le toggle
+        const savedAutoEncrypt = localStorage.getItem('sendt_auto_encrypt_dms');
+        if (savedAutoEncrypt !== null && typeof CONFIG !== 'undefined' && CONFIG.E2EE) {
+            CONFIG.E2EE.autoEncryptDMs = savedAutoEncrypt === 'true';
+        }
+    }, 4000);
+}
+
+// Affiche le modal de restauration au premier login sur un nouvel appareil (comme Element)
+function _showNewDeviceRestorePrompt() {
+    const el = document.getElementById('new-device-restore-passphrase');
+    if (el) el.value = '';
+    const errEl = document.getElementById('new-device-restore-error');
+    if (errEl) errEl.textContent = '';
+    showModal('new-device-restore-modal');
+    setTimeout(() => el?.focus(), 200);
+}
+
+async function confirmNewDeviceRestore() {
+    const passphrase = document.getElementById('new-device-restore-passphrase')?.value || '';
+    const errEl = document.getElementById('new-device-restore-error');
+    const btn = document.getElementById('new-device-restore-btn');
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    if (!passphrase) {
+        if (errEl) { errEl.textContent = 'Entrez votre phrase secrète de sauvegarde.'; errEl.classList.add('show'); }
+        return;
+    }
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Dérivation de clé... (10-30s)';
+    try {
+        const backupInfo = await matrixManager.getKeyBackupInfo();
+        if (!backupInfo) {
+            // Aucune sauvegarde sur le serveur — activer pour le futur et fermer
+            const userId = matrixManager.userId;
+            const deviceId = matrixManager.client?.getDeviceId?.();
+            localStorage.setItem(`sendt_backup_restored_${userId}_${deviceId}`, 'skipped');
+            closeModal('new-device-restore-modal');
+            showToast('ℹ️ Aucune sauvegarde trouvée — configurez-en une dans Paramètres › Sécurité', 'info');
+            return;
+        }
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Restauration des clés...';
+        const result = await matrixManager.restoreKeyBackupWithPassphrase(passphrase);
+        const userId = matrixManager.userId;
+        const deviceId = matrixManager.client?.getDeviceId?.();
+        localStorage.setItem(`sendt_backup_restored_${userId}_${deviceId}`, '1');
+        await matrixManager.enableExistingKeyBackup();
+        closeModal('new-device-restore-modal');
+        showToast(result.imported
+            ? `✅ ${result.imported} clé(s) restaurée(s) — vos anciens messages sont déchiffrables`
+            : 'ℹ️ Sauvegarde active — vos prochains messages seront sauvegardés automatiquement', 'success');
+    } catch(e) {
+        const m = e.message || '';
+        let msg;
+        if (/404|No room_keys|not found/i.test(m)) {
+            const userId = matrixManager.userId;
+            const deviceId = matrixManager.client?.getDeviceId?.();
+            localStorage.setItem(`sendt_backup_restored_${userId}_${deviceId}`, '1');
+            matrixManager.enableExistingKeyBackup().catch(() => {});
+            closeModal('new-device-restore-modal');
+            showToast('ℹ️ Sauvegarde vide — vos prochains messages seront sauvegardés automatiquement', 'info');
+            return;
+        } else if (/passphrase|password|decrypt|invalid|bad|mac|digest|Unknown message|unknown/i.test(m)) {
+            msg = 'Phrase secrète incorrecte. Vérifiez votre mot de passe de sauvegarde et réessayez.';
+        } else {
+            msg = 'Erreur : ' + m;
+        }
+        if (errEl) { errEl.textContent = msg; errEl.classList.add('show'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Restaurer mes messages'; }
+    }
+}
+
+function skipNewDeviceRestore() {
+    const userId = matrixManager.userId;
+    const deviceId = matrixManager.client?.getDeviceId?.();
+    // Marquer comme "ignoré" pour ne pas reproposer à chaque login sur cet appareil
+    localStorage.setItem(`sendt_backup_restored_${userId}_${deviceId}`, 'skipped');
+    closeModal('new-device-restore-modal');
+}
+
+// Met à jour le cadenas dans l'en-tête de conversation
+function _updateE2EELockIcon() {
+    const lockClosed = document.getElementById('chat-e2ee-lock');
+    const lockOpen   = document.getElementById('chat-e2ee-lock-open');
+    if (!lockClosed) return;
+    if (!matrixManager.cryptoEnabled) {
+        lockClosed.style.display = 'none';
+        if (lockOpen) lockOpen.style.display = 'none';
+        return;
+    }
+    const roomId = uiController?.currentContact?.roomId;
+    if (!roomId) {
+        lockClosed.style.display = 'none';
+        if (lockOpen) lockOpen.style.display = 'none';
+        return;
+    }
+    const encrypted = matrixManager.isRoomEncrypted(roomId);
+    // Cadenas vert fermé = conversation chiffrée
+    lockClosed.style.display = encrypted ? 'inline' : 'none';
+    // Cadenas jaune ouvert = conversation non chiffrée (inviter à activer)
+    if (lockOpen) lockOpen.style.display = (!encrypted && !uiController?.currentContact?.isGroup && !uiController?.currentContact?.isChannel) ? 'inline' : 'none';
+}
+
+// Activer/désactiver le chiffrement sur la conversation courante (depuis l'UI)
+async function toggleRoomEncryption() {
+    const roomId = uiController?.currentContact?.roomId;
+    if (!roomId) return;
+    if (matrixManager.isRoomEncrypted(roomId)) {
+        showToast('Le chiffrement ne peut pas être désactivé une fois activé.', 'info');
+        return;
+    }
+    if (!confirm('Activer le chiffrement de bout en bout pour cette conversation ?\n\nCette action est irréversible.')) return;
+    try {
+        await matrixManager.enableRoomEncryption(roomId);
+        showToast('✅ Chiffrement activé pour cette conversation', 'success');
+        _updateE2EELockIcon();
+    } catch(e) {
+        const msg = e.message || '';
+        if (/403|Forbidden|not allowed|permission/i.test(msg)) {
+            showToast('Droits insuffisants — seul un administrateur du salon peut activer le chiffrement.', 'error');
+        } else {
+            showToast('Erreur : ' + msg, 'error');
+        }
+    }
+}
+
+// ── Onglet Sécurité : chargement des données ────────────────────────────────
+
+async function loadSecuritySettings() {
+    const statusBadge = document.getElementById('e2ee-global-status');
+    const deviceIdEl  = document.getElementById('e2ee-device-id');
+    const fingerprintEl = document.getElementById('e2ee-device-fingerprint');
+    const backupInfoEl = document.getElementById('e2ee-backup-info');
+    const autoEncryptToggle = document.getElementById('auto-encrypt-dms');
+
+    if (!matrixManager.cryptoEnabled) {
+        if (statusBadge) { statusBadge.className = 'e2ee-status-badge inactive'; statusBadge.innerHTML = '<i class="fas fa-times-circle"></i> E2EE non disponible'; }
+        if (deviceIdEl) deviceIdEl.textContent = '—';
+        if (fingerprintEl) fingerprintEl.textContent = '—';
+        if (backupInfoEl) backupInfoEl.textContent = 'Le chiffrement E2EE n\'est pas initialisé. Rechargez la page après connexion.';
+        return;
+    }
+
+    // Statut global
+    if (statusBadge) { statusBadge.className = 'e2ee-status-badge active'; statusBadge.innerHTML = '<i class="fas fa-lock"></i> Chiffrement E2EE actif'; }
+    // Info cadenas — visible seulement quand E2EE est actif
+    const padlockInfo = document.getElementById('e2ee-padlock-info');
+    if (padlockInfo) padlockInfo.style.display = 'block';
+
+    // Infos appareil
+    const info = matrixManager.getMyDeviceInfo();
+    if (info) {
+        if (deviceIdEl) deviceIdEl.textContent = info.deviceId || '—';
+        if (fingerprintEl) fingerprintEl.textContent = info.fingerprint || '—';
+    }
+
+    // Backup
+    if (backupInfoEl) {
+        backupInfoEl.textContent = 'Vérification...';
+        const backupInfo = await matrixManager.getKeyBackupInfo();
+        if (backupInfo) {
+            backupInfoEl.innerHTML = '<span style="color:#25D366"><i class="fas fa-check-circle"></i> Sauvegarde active</span> — version ' + backupInfo.version;
+        } else {
+            backupInfoEl.innerHTML = '<span style="color:#FDEF42"><i class="fas fa-exclamation-triangle"></i> Aucune sauvegarde configurée</span>';
+        }
+    }
+
+    // Toggle auto-chiffrement DM
+    if (autoEncryptToggle) {
+        autoEncryptToggle.checked = localStorage.getItem('sendt_auto_encrypt_dms') === 'true';
+    }
+}
+
+function toggleAutoEncryptDMs(enabled) {
+    localStorage.setItem('sendt_auto_encrypt_dms', enabled ? 'true' : 'false');
+    if (typeof CONFIG !== 'undefined' && CONFIG.E2EE) CONFIG.E2EE.autoEncryptDMs = enabled;
+    showToast(enabled ? 'Auto-chiffrement DM activé' : 'Auto-chiffrement DM désactivé', 'info');
+}
+
+// ── Sauvegarde des clés ─────────────────────────────────────────────────────
+
+function showKeyBackupSetup() {
+    document.getElementById('e2ee-backup-mode-setup').classList.remove('hidden');
+    document.getElementById('e2ee-backup-mode-restore').classList.add('hidden');
+    document.getElementById('e2ee-backup-modal-title').innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Configurer la sauvegarde';
+    const err = document.getElementById('e2ee-backup-error');
+    if (err) { err.textContent = ''; err.classList.remove('show'); }
+    showModal('e2ee-backup-modal');
+}
+
+function showKeyBackupRestore() {
+    document.getElementById('e2ee-backup-mode-setup').classList.add('hidden');
+    document.getElementById('e2ee-backup-mode-restore').classList.remove('hidden');
+    document.getElementById('e2ee-backup-modal-title').innerHTML = '<i class="fas fa-cloud-download-alt"></i> Restaurer les clés';
+    const err = document.getElementById('e2ee-restore-error');
+    if (err) { err.textContent = ''; err.classList.remove('show'); }
+    showModal('e2ee-backup-modal');
+}
+
+async function confirmSetupKeyBackup() {
+    const btn = document.getElementById('e2ee-setup-backup-btn');
+    const errEl = document.getElementById('e2ee-backup-error');
+    const pass1 = document.getElementById('e2ee-backup-passphrase')?.value || '';
+    const pass2 = document.getElementById('e2ee-backup-passphrase2')?.value || '';
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    if (!pass1 || pass1.length < 8) { if (errEl) { errEl.textContent = 'Mot de passe trop court (min 8 caractères).'; errEl.classList.add('show'); } return; }
+    if (pass1 !== pass2) { if (errEl) { errEl.textContent = 'Les mots de passe ne correspondent pas.'; errEl.classList.add('show'); } return; }
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Création...';
+    try {
+        await matrixManager.setupKeyBackup(pass1);
+        closeModal('e2ee-backup-modal');
+        showToast('✅ Sauvegarde des clés configurée !', 'success');
+        document.getElementById('e2ee-backup-passphrase').value = '';
+        document.getElementById('e2ee-backup-passphrase2').value = '';
+        await loadSecuritySettings();
+    } catch(e) {
+        if (errEl) { errEl.textContent = 'Erreur : ' + (e.message || 'Impossible de créer la sauvegarde'); errEl.classList.add('show'); }
+    } finally {
+        btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Créer la sauvegarde';
+    }
+}
+
+async function confirmRestoreKeyBackup() {
+    const btn = document.getElementById('e2ee-restore-backup-btn');
+    const errEl = document.getElementById('e2ee-restore-error');
+    const passphrase = document.getElementById('e2ee-restore-passphrase')?.value || '';
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    if (!passphrase) { if (errEl) { errEl.textContent = 'Veuillez saisir votre mot de passe de sauvegarde.'; errEl.classList.add('show'); } return; }
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Restauration...';
+    try {
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Dérivation de clé... (10-30s)';
+        const result = await matrixManager.restoreKeyBackupWithPassphrase(passphrase);
+        closeModal('e2ee-backup-modal');
+        document.getElementById('e2ee-restore-passphrase').value = '';
+        if (!result.imported) {
+            showToast('ℹ️ Sauvegarde active — les clés locales ont été envoyées vers le serveur pour vos prochains appareils.', 'info');
+        } else {
+            showToast(`✅ ${result.imported} clé(s) restaurée(s). Les messages chiffrés se déchiffrent progressivement…`, 'success');
+            // Recharger la conversation courante pour afficher les messages déchiffrés
+            if (uiController?.currentContact?.roomId) {
+                setTimeout(() => uiController.loadChatHistory(uiController.currentContact), 2000);
+            }
+        }
+    } catch(e) {
+        const m = e.message || '';
+        let msg;
+        if (/404|No room_keys|not found/i.test(m)) {
+            // Backup vide — aucune clé encore sauvegardée
+            closeModal('e2ee-backup-modal');
+            showToast('ℹ️ Sauvegarde vide — vos clés seront sauvegardées automatiquement dès maintenant', 'info');
+            await matrixManager.enableExistingKeyBackup();
+            return;
+        } else if (/passphrase|password|decrypt|invalid|bad|Unknown message|unknown/i.test(m)) {
+            msg = 'Phrase secrète incorrecte. Vérifiez votre mot de passe de sauvegarde et réessayez.';
+        } else if (/aucune|not found|404/i.test(m)) {
+            msg = 'Aucune sauvegarde trouvée sur le serveur.';
+        } else {
+            msg = 'Erreur : ' + m;
+        }
+        if (errEl) { errEl.textContent = msg; errEl.classList.add('show'); }
+    } finally {
+        btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Restaurer les clés';
+    }
+}
+
+// ── Export / Import des clés de session ─────────────────────────────────────
+
+async function exportSessionKeys() {
+    if (!matrixManager.cryptoEnabled) { showToast('Chiffrement non disponible', 'error'); return; }
+    try {
+        const json = await matrixManager.exportRoomKeysAsJSON();
+        const blob = new Blob([json], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url; a.download = `sendt-e2ee-keys-${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('Clés exportées', 'success');
+    } catch(e) { showToast('Erreur export : ' + e.message, 'error'); }
+}
+
+function triggerImportKeys() {
+    document.getElementById('import-keys-file')?.click();
+}
+
+async function importSessionKeys() {
+    const fileInput = document.getElementById('import-keys-file');
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const result = await matrixManager.importRoomKeysFromJSON(text);
+        showToast(`✅ ${result.count} clé(s) importée(s)`, 'success');
+    } catch(e) {
+        showToast('Erreur import : ' + (e.message || 'Format invalide'), 'error');
+    } finally {
+        if (fileInput) fileInput.value = '';
+    }
+}
+
+// ── Vérification SAS (emojis) ────────────────────────────────────────────────
+
+let _activeVerification = null;
+let _activeSASVerifier  = null;  // l'objet SAS verifier
+let _activeSASEvent     = null;  // le sasEvent avec confirm/cancel/mismatch
+
+function _handleIncomingVerificationRequest(request) {
+    // Ignorer les requêtes déjà annulées ou terminées
+    if (request.cancelled || request.done) return;
+    _activeVerification = request;
+
+    const requesterId = request.otherUserId || request.requestingUserId || '';
+    const displayName = requesterId ? (matrixManager.client?.getUser(requesterId)?.displayName || requesterId) : 'Appareil inconnu';
+
+    document.getElementById('e2ee-verify-title').innerHTML = '<i class="fas fa-shield-alt"></i> Demande de vérification';
+    // Afficher l'identité du demandeur dans le modal
+    const acceptStep = document.getElementById('e2ee-verify-step-accept');
+    let infoEl = acceptStep?.querySelector('.verify-from-info');
+    if (!infoEl && acceptStep) {
+        infoEl = document.createElement('p');
+        infoEl.className = 'verify-from-info';
+        infoEl.style.cssText = 'margin:8px 0;color:#ccc;font-size:0.9em;';
+        acceptStep.insertBefore(infoEl, acceptStep.firstChild);
+    }
+    if (infoEl) infoEl.textContent = `De : ${displayName}`;
+
+    acceptStep?.classList.remove('hidden');
+    document.getElementById('e2ee-verify-step-compare').classList.add('hidden');
+    document.getElementById('e2ee-verify-step-waiting').classList.add('hidden');
+    showModal('e2ee-verify-modal');
+    showToast(`Demande de vérification de ${displayName}`, 'info');
+
+    // Si la requête est annulée par l'autre côté, fermer le modal
+    request.on('change', () => {
+        if (request.cancelled && _activeVerification === request) {
+            closeModal('e2ee-verify-modal');
+            showToast('Vérification annulée par l\'autre appareil', 'warning');
+            _activeVerification = null; _activeSASVerifier = null;
+        }
+    });
+}
+
+async function acceptVerificationRequest() {
+    if (!_activeVerification) return;
+    const req = _activeVerification;
+    document.getElementById('e2ee-verify-step-accept').classList.add('hidden');
+    document.getElementById('e2ee-verify-step-waiting').classList.remove('hidden');
+    try {
+        // accept() envoie m.key.verification.ready (requis pour les requêtes in-room)
+        await req.accept();
+        console.log('[Verify] READY envoyé, phase:', req.phase);
+
+        // Attendre que le requêteur envoie START (phase = Started = 4)
+        // OU envoyer START nous-mêmes si la phase est déjà READY
+        await _waitForVerificationStarted(req);
+
+        // Récupérer le verifier (créé par l'événement START entrant, ou par beginKeyVerification)
+        let verifier = req.verifier;
+        if (!verifier) {
+            verifier = req.beginKeyVerification('m.sas.v1');
+        }
+        _activeSASVerifier = verifier;
+        verifier.on('show_sas', _showSASEmojis);
+        await verifier.verify();
+    } catch(e) {
+        console.error('[Verify] Erreur acceptation:', e);
+        if (e.message !== 'cancelled') {
+            showToast('Erreur de vérification : ' + e.message, 'error');
+        }
+        closeModal('e2ee-verify-modal');
+        _activeVerification = null; _activeSASVerifier = null;
+    }
+}
+
+async function startVerificationWithUser(userId, roomId) {
+    if (!matrixManager.cryptoEnabled) { showToast('Le chiffrement E2EE n\'est pas activé', 'error'); return; }
+    document.getElementById('e2ee-verify-title').innerHTML = '<i class="fas fa-shield-alt"></i> Vérifier l\'identité';
+    document.getElementById('e2ee-verify-step-accept').classList.add('hidden');
+    document.getElementById('e2ee-verify-step-compare').classList.add('hidden');
+    document.getElementById('e2ee-verify-step-waiting').classList.remove('hidden');
+    showModal('e2ee-verify-modal');
+    try {
+        const dmRoomId = roomId || await matrixManager.getOrCreateRoomForUser(userId);
+        console.log('[Verify] Envoi demande in-room vers', userId, '— room:', dmRoomId);
+        const request = await matrixManager.requestSASVerificationInDM(userId, dmRoomId);
+        _activeVerification = request;
+        const txnId = request.transactionId;
+        console.log('[Verify] Demande envoyée, phase:', request.phase, '— txnId:', txnId);
+
+        // Attendre READY via Room.timeline (request.on('change') ne se déclenche pas dans ce SDK)
+        const client = matrixManager.getClient();
+        await _waitForVerificationEventInRoom(client, txnId, 'm.key.verification.ready');
+        console.log('[Verify] READY reçu — attente traitement SDK (500ms)...');
+
+        // Laisser le SDK traiter l'événement READY avant d'appeler beginKeyVerification
+        await new Promise(r => setTimeout(r, 500));
+        console.log('[Verify] Phase après attente:', request.phase);
+
+        // Si Element a aussi envoyé START (phase=4), récupérer le verifier existant
+        let verifier = request.verifier;
+        if (!verifier) {
+            console.log('[Verify] Envoi START (beginKeyVerification)...');
+            verifier = request.beginKeyVerification('m.sas.v1');
+        } else {
+            console.log('[Verify] Verifier déjà créé par START entrant');
+        }
+        _activeSASVerifier = verifier;
+        verifier.on('show_sas', _showSASEmojis);
+        await verifier.verify();
+    } catch(e) {
+        console.error('[Verify] Erreur initiation:', e);
+        if (e.message !== 'cancelled') {
+            showToast('Impossible de démarrer la vérification : ' + e.message, 'error');
+        }
+        closeModal('e2ee-verify-modal');
+        _activeVerification = null; _activeSASVerifier = null;
+    }
+}
+
+// Attend un événement de vérification spécifique dans la room via Room.timeline
+function _waitForVerificationEventInRoom(client, txnId, expectedType) {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            client?.removeListener('Room.timeline', onEvent);
+            reject(new Error('l\'autre appareil n\'a pas accepté'));
+        }, 120000);
+
+        function onEvent(event) {
+            const type = event.getType();
+            if (!type?.includes('verification')) return;
+            const content = event.getContent();
+            const relatesTo = content?.['m.relates_to'] ?? {};
+            console.log('[Verify] 📨 Room.timeline:', type, '— relates_to:', relatesTo);
+
+            if (relatesTo.event_id === txnId) {
+                if (type === expectedType) {
+                    clearTimeout(timeout);
+                    client?.removeListener('Room.timeline', onEvent);
+                    resolve();
+                } else if (type === 'm.key.verification.cancel') {
+                    clearTimeout(timeout);
+                    client?.removeListener('Room.timeline', onEvent);
+                    reject(new Error('cancelled'));
+                }
+            }
+        }
+        client?.on('Room.timeline', onEvent);
+    });
+}
+
+// Attend la phase Started=4 (utilisé côté répondeur après accept())
+function _waitForVerificationStarted(request) {
+    return new Promise((resolve, reject) => {
+        const check = () => {
+            const p = request.phase;
+            if (p === 4) { resolve(); return true; }
+            if (p === 5 || request.cancelled) { reject(new Error('cancelled')); return true; }
+            if (p === 6) { resolve(); return true; }
+            return false;
+        };
+        if (check()) return;
+        const timeout = setTimeout(() => {
+            request.removeListener?.('change', onChange);
+            resolve(); // on laisse beginKeyVerification gérer
+        }, 10000);
+        function onChange() {
+            if (check()) { clearTimeout(timeout); request.removeListener?.('change', onChange); }
+        }
+        request.on('change', onChange);
+    });
+}
+
+function _showSASEmojis(sasData) {
+    // sasData est le sasEvent émis par SasEvent.ShowSas — il contient confirm/cancel/mismatch
+    _activeSASEvent = sasData;
+    const container = document.getElementById('e2ee-emoji-container');
+    const decimalEl = document.getElementById('e2ee-decimal-code');
+    const emojis = sasData.sas?.emoji || [];
+    if (container) {
+        container.innerHTML = emojis.map(([emoji, label]) =>
+            `<div class="e2ee-emoji-item"><span class="e2ee-emoji">${emoji}</span><span class="e2ee-emoji-label">${label}</span></div>`
+        ).join('');
+    }
+    if (decimalEl && sasData.sas?.decimal) {
+        decimalEl.textContent = sasData.sas.decimal.join(' - ');
+    }
+    document.getElementById('e2ee-verify-step-waiting').classList.add('hidden');
+    document.getElementById('e2ee-verify-step-compare').classList.remove('hidden');
+}
+
+async function confirmSASVerification() {
+    if (!_activeSASEvent) return;
+    try {
+        await _activeSASEvent.confirm();
+        showToast('✅ Appareil vérifié avec succès !', 'success');
+    } catch(e) {
+        showToast('Erreur : ' + e.message, 'error');
+    } finally {
+        closeModal('e2ee-verify-modal');
+        _activeVerification = null; _activeSASVerifier = null; _activeSASEvent = null;
+        await loadSecuritySettings();
+    }
+}
+
+// ── Cross-signing ────────────────────────────────────────────────────────────
+
+let _crossSigningRecoveryKey = null;
+
+function showCrossSigningSetup() {
+    document.getElementById('e2ee-cs-step-intro').classList.remove('hidden');
+    document.getElementById('e2ee-cs-step-key').classList.add('hidden');
+    document.getElementById('e2ee-cs-passphrase').value = '';
+    document.getElementById('e2ee-cs-passphrase2').value = '';
+    const errEl = document.getElementById('e2ee-cs-error');
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    showModal('e2ee-crosssign-modal');
+}
+
+async function confirmCrossSigningSetup() {
+    const btn = document.getElementById('e2ee-cs-setup-btn');
+    const errEl = document.getElementById('e2ee-cs-error');
+    const pass1 = document.getElementById('e2ee-cs-passphrase')?.value || '';
+    const pass2 = document.getElementById('e2ee-cs-passphrase2')?.value || '';
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+    if (pass1.length < 8) { if (errEl) { errEl.textContent = 'Phrase secrète trop courte (min 8 caractères).'; errEl.classList.add('show'); } return; }
+    if (pass1 !== pass2) { if (errEl) { errEl.textContent = 'Les phrases secrètes ne correspondent pas.'; errEl.classList.add('show'); } return; }
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Configuration...';
+    try {
+        const result = await matrixManager.bootstrapCrossSigning(pass1);
+        _crossSigningRecoveryKey = result.recoveryKey;
+        // Afficher la clé de récupération
+        document.getElementById('e2ee-cs-step-intro').classList.add('hidden');
+        const keyEl = document.getElementById('e2ee-cs-recovery-key');
+        if (keyEl) keyEl.textContent = result.recoveryKey || '(Clé générée — voir les paramètres de sauvegarde)';
+        document.getElementById('e2ee-cs-step-key').classList.remove('hidden');
+        // Mettre à jour le statut dans l'onglet sécurité
+        setTimeout(() => loadSecuritySettings(), 500);
+    } catch(e) {
+        // bootstrapCrossSigning peut échouer sur certains serveurs — ce n'est pas bloquant
+        console.warn('[E2EE] Cross-signing setup partiel:', e.message);
+        if (errEl) { errEl.textContent = 'Configuration partielle : ' + e.message; errEl.classList.add('show'); }
+        // Fallback : utiliser la sauvegarde standard
+        try {
+            const backupResult = await matrixManager.setupKeyBackup(pass1);
+            _crossSigningRecoveryKey = backupResult.recoveryKey;
+            document.getElementById('e2ee-cs-step-intro').classList.add('hidden');
+            const keyEl = document.getElementById('e2ee-cs-recovery-key');
+            if (keyEl) keyEl.textContent = backupResult.recoveryKey || '(Sauvegarde configurée)';
+            document.getElementById('e2ee-cs-step-key').classList.remove('hidden');
+            setTimeout(() => loadSecuritySettings(), 500);
+        } catch(e2) {
+            if (errEl) { errEl.textContent = 'Erreur : ' + e2.message; errEl.classList.add('show'); }
+        }
+    } finally {
+        btn.disabled = false; btn.innerHTML = '<i class="fas fa-key"></i> Configurer la sécurité';
+    }
+}
+
+function skipCrossSigningSetup() {
+    localStorage.setItem('sendt_e2ee_setup_skipped', '1');
+    closeModal('e2ee-crosssign-modal');
+}
+
+function _copyRecoveryKey() {
+    const keyEl = document.getElementById('e2ee-cs-recovery-key');
+    const key = keyEl?.textContent;
+    if (!key) return;
+    navigator.clipboard.writeText(key).then(() => showToast('Clé copiée !', 'success')).catch(() => {
+        // Fallback pour les navigateurs sans clipboard API
+        const ta = document.createElement('textarea');
+        ta.value = key; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+        showToast('Clé copiée !', 'success');
+    });
+}
+
+function showVerifyOtherDevice() {
+    const userId = uiController?.currentContact?.userId;
+    const roomId = uiController?.currentContact?.roomId;
+    if (!userId) {
+        showToast('Sélectionnez d\'abord un contact à vérifier', 'info');
+        closeModal('settings-modal');
+        return;
+    }
+    startVerificationWithUser(userId, roomId);
+}
+
+async function cancelSASVerification() {
+    try {
+        if (_activeSASEvent) await _activeSASEvent.cancel?.();
+        else if (_activeSASVerifier) await _activeSASVerifier.cancel?.();
+        else if (_activeVerification) await _activeVerification.cancel?.();
+    } catch(e) {}
+    showToast('Vérification annulée', 'info');
+    closeModal('e2ee-verify-modal');
+    _activeVerification = null; _activeSASVerifier = null; _activeSASEvent = null;
+}
+
+
+
+// ── Gestion des sessions / appareils connectés ────────────────────────────────
+
+async function loadConnectedDevices() {
+    const container = document.getElementById('connected-devices-list');
+    const icon = document.getElementById('devices-refresh-icon');
+    if (!container) return;
+    if (icon) icon.classList.add('fa-spin');
+    container.innerHTML = '<div style="color:#8696A0;font-size:.82rem;text-align:center;padding:10px;"><i class="fas fa-spinner fa-spin"></i> Chargement...</div>';
+
+    const devices = await matrixManager.getAllConnectedDevices();
+
+    if (icon) icon.classList.remove('fa-spin');
+
+    if (!devices.length) {
+        container.innerHTML = '<div style="color:#8696A0;font-size:.82rem;text-align:center;padding:10px;">Impossible de charger les appareils.</div>';
+        return;
+    }
+
+    container.innerHTML = devices.map(dev => {
+        const isCurrent = dev.isCurrent;
+        return `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${isCurrent ? 'rgba(0,133,63,.08)' : 'rgba(255,255,255,.03)'};border:1px solid ${isCurrent ? 'rgba(0,133,63,.25)' : 'rgba(255,255,255,.06)'};border-radius:8px;">
+            <i class="fas fa-${isCurrent ? 'desktop' : 'mobile-alt'}" style="color:${isCurrent ? '#00853F' : '#8696A0'};width:18px;text-align:center;"></i>
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:.84rem;color:#E9EDEF;font-weight:500;display:flex;align-items:center;gap:6px;">
+                    ${_escHtml(dev.displayName)}
+                    ${isCurrent ? '<span style="font-size:.65rem;background:rgba(0,133,63,.2);color:#25D366;padding:1px 6px;border-radius:10px;font-weight:600;">Cet appareil</span>' : ''}
+                </div>
+                <div style="font-size:.72rem;color:#8696A0;margin-top:1px;">Dernière activité : ${_escHtml(dev.lastSeen)}${dev.lastSeenIp ? ' · ' + _escHtml(dev.lastSeenIp) : ''}</div>
+            </div>
+            ${isCurrent
+                ? '<span style="font-size:.72rem;color:#25D366;white-space:nowrap;"><i class="fas fa-check-circle"></i> Connecté</span>'
+                : `<button onclick="showDisconnectDeviceModal('${_escAttr(dev.deviceId)}','${_escAttr(dev.displayName)}')" style="background:rgba(227,27,35,.12);color:#E31B23;border:1px solid rgba(227,27,35,.3);border-radius:6px;padding:5px 10px;font-size:.75rem;cursor:pointer;white-space:nowrap;" title="Déconnecter cet appareil"><i class="fas fa-sign-out-alt"></i> Déconnecter</button>`
+            }
+        </div>`;
+    }).join('');
+}
+
+function showDisconnectDeviceModal(deviceId, deviceName) {
+    document.getElementById('disconnect-device-id').value = deviceId;
+    document.getElementById('disconnect-device-name').textContent = deviceName;
+    document.getElementById('disconnect-device-password').value = '';
+    document.getElementById('disconnect-device-error').textContent = '';
+    showModal('disconnect-device-modal');
+    setTimeout(() => document.getElementById('disconnect-device-password')?.focus(), 200);
+}
+
+async function confirmDisconnectDevice() {
+    const deviceId = document.getElementById('disconnect-device-id').value;
+    const password = document.getElementById('disconnect-device-password').value;
+    const errorEl = document.getElementById('disconnect-device-error');
+    const btn = document.getElementById('disconnect-device-confirm-btn');
+    if (!password) { errorEl.textContent = 'Entrez votre mot de passe.'; return; }
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Déconnexion...';
+    errorEl.textContent = '';
+    const result = await matrixManager.deleteConnectedDevice(deviceId, password);
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Déconnecter';
+    if (result.success) {
+        closeModal('disconnect-device-modal');
+        showToast('Appareil déconnecté', 'success');
+        await loadConnectedDevices();
+    } else {
+        errorEl.textContent = result.error || 'Erreur de déconnexion.';
+    }
+}
+
+// ── Détection de double connexion (comme Element / WhatsApp) ──────────────────
+
+async function checkMultipleSessions() {
+    try {
+        const devices = await matrixManager.getAllConnectedDevices();
+        const others = devices.filter(d => !d.isCurrent);
+        if (!others.length) return;
+
+        document.getElementById('other-sessions-count').textContent = others.length;
+        const listEl = document.getElementById('other-devices-list');
+        if (listEl) {
+            listEl.innerHTML = others.map(d => `
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:6px;font-size:.82rem;color:#8696A0;">
+                    <i class="fas fa-mobile-alt" style="color:#8696A0;width:14px;"></i>
+                    <span style="flex:1;">${_escHtml(d.displayName)}</span>
+                    <span style="font-size:.72rem;">${_escHtml(d.lastSeen)}</span>
+                </div>`).join('');
+        }
+        showModal('multi-session-modal');
+    } catch(e) { console.warn('checkMultipleSessions:', e.message); }
+}
+
+async function disconnectOtherSessions() {
+    closeModal('multi-session-modal');
+    const password = prompt('Entrez votre mot de passe pour déconnecter les autres appareils :');
+    if (!password) return;
+    const devices = await matrixManager.getAllConnectedDevices();
+    const others = devices.filter(d => !d.isCurrent);
+    let ok = 0, fail = 0;
+    for (const d of others) {
+        const r = await matrixManager.deleteConnectedDevice(d.deviceId, password);
+        r.success ? ok++ : fail++;
+    }
+    if (ok) showToast(`${ok} appareil(s) déconnecté(s)`, 'success');
+    if (fail) showToast(`${fail} échec(s) — vérifiez votre mot de passe`, 'error');
+}
+
+// ── Helpers HTML escape ───────────────────────────────────────────────────────
+function _escHtml(s) { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; }
+function _escAttr(s) { return String(s ?? '').replace(/'/g, '&#39;').replace(/"/g, '&quot;'); }

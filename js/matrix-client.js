@@ -1,4 +1,8 @@
-// matrix-client.js — SENDT v18.11
+// matrix-client.js — SENDT v19.1
+// ✅ Fixes v19.1 :
+// - _initCrypto : try/catch SÉPARÉS pour Rust et Olm — fallback Olm si Rust WASM non disponible
+// - restoreKeyBackupWithPassphrase : utilise client.restoreKeyBackupWithPassword (Rust + Legacy)
+// - RoomState.events : émet room-encryption-changed pour mise à jour du cadenas en temps réel
 // ✅ Fixes v18.11 :
 // - Fix accusés de lecture : _applyReadReceiptImmediately met à jour uiController._readReceipts AVANT DOM
 // - Fix propagation ticks : tous les messages isOwn antérieurs passent en bleu (avec target inclus)
@@ -13,6 +17,8 @@ class MatrixManager {
         this._callActive = false; this._activeCallRoomId = null;
         this._mediaBlobCache = {}; this._isRinging = false;
         this._presenceMap = {};
+        this.cryptoEnabled = false;
+        this._handledEventIds = new Set();
     }
     _getSDK() { return window.matrixcs || window.Matrix || window.matrix || window.sdk; }
     async login(homeserverUrl, username, password) {
@@ -25,7 +31,36 @@ class MatrixManager {
             const loginResp = await tempClient.loginWithPassword(userId, password);
             this.userId = loginResp.user_id; this.accessToken = loginResp.access_token;
             const deviceId = loginResp.device_id || ('SENDT_' + (this.userId || 'DEV').replace(/[^A-Z0-9]/gi,'').substring(0,10).toUpperCase());
-            this.client = sdk.createClient({ baseUrl: homeserverUrl, accessToken: this.accessToken, userId: this.userId, deviceId, timelineSupport: true });
+
+            // ── Store persistant pour les salons et la timeline ─────────────────────
+            let mainStore;
+            try {
+                mainStore = new sdk.IndexedDBStore({
+                    indexedDB: window.indexedDB,
+                    dbName: `sendt-store-${this.userId}`,
+                    workerSupport: false
+                });
+                await mainStore.startup();
+            } catch(e) { mainStore = undefined; }
+
+            // ── CryptoStore pour les clés Olm (legacy fallback) ──────────────────────
+            const cryptoStore = sdk.IndexedDBCryptoStore
+                ? new sdk.IndexedDBCryptoStore(window.indexedDB, 'sendt:crypto')
+                : undefined;
+
+            this.client = sdk.createClient({
+                baseUrl: homeserverUrl,
+                accessToken: this.accessToken,
+                userId: this.userId,
+                deviceId,
+                timelineSupport: true,
+                ...(mainStore  ? { store: mainStore }       : {}),
+                ...(cryptoStore ? { cryptoStore }            : {}),
+            });
+
+            // ── Initialiser le chiffrement E2EE (méthode Element) ───────────────────
+            await this._initCrypto();
+
             try { const p = await this.client.getProfileInfo(this.userId); this._profile = p || {}; } catch(e) {}
             await this.startSync();
             return { success: true, userId: this.userId };
@@ -44,6 +79,57 @@ class MatrixManager {
             return { success: false, error: msg };
         }
     }
+
+    // ── Initialisation E2EE exactement comme Element ────────────────────────────
+    // Priorité : Rust Crypto (moderne, pas besoin d'Olm) → Olm Legacy → désactivé
+    async _initCrypto() {
+        if (!this.client) { this.cryptoEnabled = false; return; }
+
+        // 1. Rust Crypto (méthode moderne) — try/catch SÉPARÉ pour pouvoir tomber sur Olm si non disponible
+        if (typeof this.client.initRustCrypto === 'function') {
+            try {
+                await this.client.initRustCrypto();
+                this.cryptoEnabled = true;
+                this._cryptoApiVersion = 'rust';
+                console.log('[E2EE] ✅ Rust Crypto actif — appareil :', this.client.getDeviceId());
+                this.client.setGlobalErrorOnUnknownDevices?.(false);
+                try {
+                    const cryptoApi = this.client.getCrypto?.();
+                    if (cryptoApi?.checkKeyBackupAndEnable) {
+                        const backup = await cryptoApi.checkKeyBackupAndEnable();
+                        if (backup) console.log('[E2EE] ✅ Sauvegarde de clés active — version', backup.backupInfo?.version);
+                    }
+                } catch(e) { console.log('[E2EE] Sauvegarde non configurée:', e.message); }
+                return;
+            } catch(e) {
+                // Rust crypto WASM non disponible dans ce build — fallback Olm
+                console.warn('[E2EE] Rust Crypto non disponible (' + e.message + ') — tentative Olm legacy');
+            }
+        }
+
+        // 2. Fallback : Olm legacy — try/catch SÉPARÉ
+        if (window.Olm) {
+            try {
+                await this.client.initCrypto();
+                this.cryptoEnabled = true;
+                this._cryptoApiVersion = 'legacy-olm';
+                console.log('[E2EE] ✅ Olm Crypto (legacy) actif — appareil :', this.client.getDeviceId());
+                this.client.setGlobalErrorOnUnknownDevices?.(false);
+                try {
+                    const backup = await this.client.getKeyBackupVersion();
+                    if (backup) await this.client.enableKeyBackup(backup);
+                } catch(e) {}
+                return;
+            } catch(e) {
+                console.warn('[E2EE] ❌ Olm Crypto échoué:', e.message);
+            }
+        }
+
+        // 3. Aucune crypto disponible
+        console.warn('[E2EE] ⚠️ Ni Rust Crypto ni Olm disponibles — E2EE désactivé');
+        this.cryptoEnabled = false;
+    }
+
     async startSync() {
         if (!this.client) return;
         this._clientStartTime = Date.now();
@@ -113,6 +199,17 @@ class MatrixManager {
     _parseEventToMessage(event) {
         if (!event || event.getType() !== 'm.room.message') return null;
         const content = event.getContent(); const msgtype = content?.msgtype; if (!msgtype) return null;
+        // ── Déchiffrement échoué : le SDK retourne msgtype 'm.bad.encrypted' ou isDecryptionFailure() ──
+        if (msgtype === 'm.bad.encrypted' || event.isDecryptionFailure?.()) {
+            return {
+                eventId: event.getId(), senderId: event.getSender(), sender: event.getSender(),
+                isOwn: event.getSender() === this.userId, type: 'decrypt-error',
+                message: '🔒 Message chiffré — impossible à déchiffrer sur cet appareil',
+                timestamp: event.getTs(), encrypted: true, decryptError: true,
+                mxcUrl: null, filename: null, fileInfo: null, audioDuration: 0, geoUri: null, mimetype: null,
+                isReply: false, replyToEventId: null, ephemeral: null, viewOnce: false,
+            };
+        }
         const relatesTo = content['m.relates_to'];
         if (relatesTo?.rel_type === 'm.replace') return null;
         const isOwn = event.getSender() === this.userId;
@@ -147,12 +244,21 @@ class MatrixManager {
             else {
                 if (membership !== 'join') this._invitations = this._invitations.filter(i => i.roomId !== room.roomId);
                 setTimeout(() => this.loadRooms(), 500);
+                setTimeout(() => this.loadRooms(), 3000); // filet de sécurité — attend que l'état complet soit syncé
             }
         });
         this.client.on('Room.timeline', (event, room, toStartOfTimeline) => {
             if (toStartOfTimeline || !room) return;
             const evType = event.getType();
-            if (evType === 'm.room.message') { this._handleNewMessage(event, room); return; }
+            if (evType === 'm.room.message') {
+                this._handledEventIds.add(event.getId());
+                this._handleNewMessage(event, room);
+                return;
+            }
+            if (evType === 'm.room.encrypted') {
+                if (event.isDecryptionFailure?.()) this._handleDecryptionError(event, room);
+                return;
+            }
             if (evType === 'm.call.invite') { this._handleCallInviteEvent(event, room); return; }
             if (evType === 'm.call.answer') { this._handleCallAnswerEvent(event); return; }
             if (evType === 'm.call.candidates') { this._handleCallCandidatesEvent(event); return; }
@@ -175,9 +281,15 @@ class MatrixManager {
                 window.dispatchEvent(new CustomEvent('member-joined', { detail: { roomId: event.getRoomId(), userId: member.userId, displayName: member.name } }));
                 if (typeof showToast === 'function') showToast(`${member.name} a rejoint`, 'success');
                 setTimeout(() => this.loadRooms(), 800);
+                setTimeout(() => this.loadRooms(), 3000);
             }
         });
         this.client.on('RoomState.events', (event) => {
+            // Notifier l'UI quand le chiffrement d'un salon est activé (mise à jour du cadenas)
+            if (event.getType() === 'm.room.encryption') {
+                window.dispatchEvent(new CustomEvent('room-encryption-changed', { detail: { roomId: event.getRoomId() } }));
+                return;
+            }
             if (event.getType() !== 'm.typing') return;
             const roomId = event.getRoomId();
             const userIds = event.getContent()?.user_ids || [];
@@ -195,6 +307,46 @@ class MatrixManager {
                 window.dispatchEvent(new CustomEvent('presence-changed', { detail: { userId: user.userId, presence: user.presence || 'offline', lastActiveAgo: user.lastActiveAgo, currentlyActive: user.currentlyActive } }));
             }
         });
+        // ── E2EE : décryptage tardif (clé reçue après le message ou l'appel) ──
+        this.client.on('Event.decrypted', (event, err) => {
+            if (err) {
+                const room = this.client.getRoom(event.getRoomId());
+                if (room) this._handleDecryptionError(event, room);
+                return;
+            }
+            const decryptedType = event.getType();
+            const room = this.client.getRoom(event.getRoomId());
+            if (!room) return;
+            // Appels dans un salon chiffré : traiter les événements d'appel après déchiffrement
+            if (decryptedType === 'm.call.invite') { this._handleCallInviteEvent(event, room); return; }
+            if (decryptedType === 'm.call.answer') { this._handleCallAnswerEvent(event); return; }
+            if (decryptedType === 'm.call.candidates') { this._handleCallCandidatesEvent(event); return; }
+            if (decryptedType === 'm.call.hangup') { this._handleCallHangupEvent(event); return; }
+            if (decryptedType === 'm.call.negotiate') { this._handleCallNegotiateEvent(event); return; }
+            if (decryptedType !== 'm.room.message') return;
+            const eventId = event.getId();
+            // Émettre un event pour mettre à jour les messages précédemment affichés en erreur
+            const parsed = this._parseEventToMessage(event);
+            if (parsed) {
+                const member = room.getMember?.(parsed.senderId);
+                parsed.senderName = member?.name || parsed.senderId;
+                window.dispatchEvent(new CustomEvent('message-decrypted-late', {
+                    detail: { roomId: event.getRoomId(), eventId, message: parsed }
+                }));
+            }
+            if (this._handledEventIds.has(eventId)) return;
+            this._handledEventIds.add(eventId);
+            this._handleNewMessage(event, room);
+        });
+        // ── E2EE : demandes de vérification entrantes ──────────────────────────
+        this.client.on('crypto.verification.request', (request) => {
+            window.dispatchEvent(new CustomEvent('e2ee-verification-request', { detail: { request } }));
+        });
+        // ── E2EE : état de la sauvegarde des clés ─────────────────────────────
+        this.client.on('crypto.keyBackupStatus', (enabled) => {
+            window.dispatchEvent(new CustomEvent('e2ee-backup-status', { detail: { enabled } }));
+        });
+
         // ✅ Accusés de lecture — mise à jour IMMÉDIATE dans le DOM sans re-render complet
         this.client.on('Room.receipt', (event, room) => {
             if (!room) return;
@@ -239,6 +391,18 @@ class MatrixManager {
         // Mettre à jour le DOM directement — tous les ticks antérieurs passent en bleu
         this._markPreviousMessagesRead(roomId, eventId);
     }
+    _handleDecryptionError(event, room) {
+        if (!room || !event) return;
+        const msg = {
+            eventId: event.getId(), senderId: event.getSender(), type: 'decrypt-error',
+            message: '🔒 Message chiffré — impossible à déchiffrer (session manquante)',
+            timestamp: event.getTs(), isOwn: event.getSender() === this.userId,
+            encrypted: true, decryptError: true,
+        };
+        if (this.onNewMessage) this.onNewMessage(room.roomId, msg);
+        window.dispatchEvent(new CustomEvent('new-message', { detail: { roomId: room.roomId, message: msg } }));
+    }
+
     _markPreviousMessagesRead(roomId, upToEventId) {
         if (typeof uiController === 'undefined') return;
         const msgs = uiController.chatMessages?.[roomId] || [];
@@ -290,7 +454,7 @@ class MatrixManager {
         }
         const age = Date.now() - eventTs;
         if (age > 45000) { console.log('[Matrix] 📞 Appel ignoré (trop ancien):', age, 'ms'); return; }
-        if (this._callActive) { try { this.client.sendEvent(event.getRoomId(), 'm.call.hangup', { call_id: content.call_id, version: 1, reason: 'user_busy' }).catch(() => {}); } catch(e) {} return; }
+        if (this._callActive) { this.sendCallEvent(event.getRoomId(), 'm.call.hangup', { call_id: content.call_id, version: 1, reason: 'user_busy' }).catch(() => {}); return; }
         const sdp = content.offer?.sdp || '';
         const isVideoCall = sdp.includes('m=video') && !/m=video\s+0\s/.test(sdp);
         this._callActive = true; this._activeCallRoomId = event.getRoomId();
@@ -513,15 +677,21 @@ class MatrixManager {
         window.dispatchEvent(new CustomEvent('contacts-loaded', { detail: { contacts, groups, channels } }));
     }
     _detectRoomType(room) {
+        // 1. Marqueur explicite SENDT — priorité absolue (avant toute heuristique de comptage)
+        try { const srt = room.currentState?.getStateEvents?.('sendt.room.type', ''); if (srt?.getContent?.()?.type === 'group') return 'group'; } catch(e) {}
+        // 2. m.direct account data — marqueur explicite DM
         try { const dd = this.client.getAccountData('m.direct')?.getContent() || {}; if (Object.values(dd).flat().includes(room.roomId)) return 'dm'; } catch(e) {}
-        // Most reliable indicator: m.room.create.is_direct flag set by the SDK when creating DMs
+        // 3. m.room.create.is_direct flag posé par le SDK lors de la création des DMs
         try { const ce = room.currentState?.getStateEvents?.('m.room.create', ''); if (ce?.getContent?.()?.is_direct === true) return 'dm'; } catch(e) {}
         const members = room.getJoinedMembers?.() || [];
         if (room.getDMInviter?.()) return 'dm';
-        // Count invited members too — groups may have few joined members if invitees haven't accepted yet
+        // 4. Power levels propres aux groupes SENDT (users_default:0, state_default:50)
+        try { const plc = room.currentState?.getStateEvents?.('m.room.power_levels', '')?.getContent?.() || {}; if (plc.users_default === 0 && plc.state_default === 50) return 'group'; } catch(e) {}
+        // 5. Nombre de membres (invited inclus)
         let totalCount = members.length;
         try { totalCount += (room.getMembersWithMembership?.('invite') || []).length; } catch(e) {}
         if (totalCount > 2) { const jr = room.currentState?.getStateEvents?.('m.room.join_rules', ''); if (jr?.getContent?.()?.join_rule === 'public') return 'channel'; return 'group'; }
+        // 6. Heuristique DM : nom du salon = nom de l'autre membre
         if (members.length <= 2) { const other = members.find(m => m.userId !== this.userId); const name = room.name || ''; if (!name || (other && (name === other.name || name === other.userId || name.includes(other.userId.split(':')[0])))) return 'dm'; }
         const jr = room.currentState?.getStateEvents?.('m.room.join_rules', '');
         if (jr?.getContent?.()?.join_rule === 'public') return 'channel';
@@ -535,9 +705,23 @@ class MatrixManager {
         const timeline = room.getLiveTimeline?.()?.getEvents() || [];
         let lastMessage = '', lastTime = null;
         for (let i = timeline.length - 1; i >= 0; i--) {
-            const ev = timeline[i]; if (ev.getType() !== 'm.room.message') continue;
+            const ev = timeline[i];
+            const evType = ev.getType();
+            if (evType === 'm.room.encrypted') {
+                // Message chiffré non déchiffrable sur cet appareil
+                if (ev.isDecryptionFailure?.()) { lastMessage = '🔒 Message chiffré'; lastTime = ev.getTs(); break; }
+                continue;
+            }
+            if (evType !== 'm.room.message') continue;
             const parsed = this._parseEventToMessage(ev); if (!parsed) continue;
-            if (parsed.type === 'text') lastMessage = parsed.message; else if (parsed.type === 'image') lastMessage = '📷 Image'; else if (parsed.type === 'video') lastMessage = '🎬 Vidéo'; else if (parsed.type === 'voice') lastMessage = '🎙️ Vocal'; else if (parsed.type === 'audio') lastMessage = '🔊 Audio'; else if (parsed.type === 'file') lastMessage = '📎 ' + (parsed.filename||'Fichier'); else if (parsed.type === 'location') lastMessage = '📍 Position';
+            if (parsed.decryptError) lastMessage = '🔒 Message chiffré';
+            else if (parsed.type === 'text') lastMessage = parsed.message;
+            else if (parsed.type === 'image') lastMessage = '📷 Image';
+            else if (parsed.type === 'video') lastMessage = '🎬 Vidéo';
+            else if (parsed.type === 'voice') lastMessage = '🎙️ Vocal';
+            else if (parsed.type === 'audio') lastMessage = '🔊 Audio';
+            else if (parsed.type === 'file') lastMessage = '📎 ' + (parsed.filename||'Fichier');
+            else if (parsed.type === 'location') lastMessage = '📍 Position';
             lastTime = parsed.timestamp; break;
         }
         return { roomId: room.roomId, displayName, userId, avatarUrl, lastMessage, lastTime, memberCount: members.length, unreadCount: room.getUnreadNotificationCount?.() || 0 };
@@ -549,10 +733,27 @@ class MatrixManager {
             try { await this.client.scrollback(room, limit); } catch(e) {}
             const results = [];
             for (const event of room.getLiveTimeline().getEvents()) {
-                if (event.getType() !== 'm.room.message') continue;
-                const parsed = this._parseEventToMessage(event); if (!parsed) continue;
-                const member = room.getMember?.(parsed.senderId); parsed.senderName = member?.name || parsed.senderId;
-                results.push(parsed);
+                if (event.getType() === 'm.room.message') {
+                    const parsed = this._parseEventToMessage(event); if (!parsed) continue;
+                    const member = room.getMember?.(parsed.senderId); parsed.senderName = member?.name || parsed.senderId;
+                    results.push(parsed);
+                } else if (event.getType() === 'm.room.encrypted') {
+                    // ── E2EE : message chiffré que cet appareil ne peut pas déchiffrer ──
+                    // Exactement comme Element : "🔒 Impossible de déchiffrer (session manquante)"
+                    const failed = event.isDecryptionFailure?.() !== false;
+                    if (failed) {
+                        results.push({
+                            eventId: event.getId(),
+                            senderId: event.getSender(),
+                            type: 'decrypt-error',
+                            message: 'Message chiffré — impossible à déchiffrer sur cet appareil',
+                            timestamp: event.getTs(),
+                            isOwn: event.getSender() === this.userId,
+                            encrypted: true,
+                            decryptError: true,
+                        });
+                    }
+                }
             }
             return results.slice(-limit);
         } catch(e) { return []; }
@@ -568,6 +769,24 @@ class MatrixManager {
             }
         } catch(e) {}
         return receipts;
+    }
+    // ── Envoi d'événement d'appel SANS chiffrement (même dans un salon E2EE) ──
+    // Les événements m.call.* n'ont pas besoin d'E2EE : le flux audio/vidéo est protégé
+    // par DTLS-SRTP au niveau WebRTC. Envoyer sans chiffrement évite les délais de
+    // déchiffrement qui font rater les appels (age > 45s → ignoré).
+    async sendCallEvent(roomId, eventType, content) {
+        if (!this.client || !roomId) throw new Error('Client non disponible');
+        const txnId = 'm' + Date.now() + '.' + Math.floor(Math.random() * 9999);
+        const baseUrl = this.client.getHomeserverUrl();
+        const token = this.client.getAccessToken();
+        const url = `${baseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/${txnId}`;
+        const resp = await fetch(url, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(content)
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return await resp.json();
     }
     async sendMessage(roomId, text) { if (!this.client || !roomId || !text?.trim()) return false; try { await this.client.sendTextMessage(roomId, text.trim()); return true; } catch(e) { return false; } }
     async sendReaction(roomId, eventId, emoji) {
@@ -623,7 +842,7 @@ class MatrixManager {
     async editMessage(roomId, eventId, oldText, newText) { if (!this.client) return false; try { await this.client.sendMessage(roomId,{msgtype:'m.text',body:`* ${newText}`,'m.new_content':{msgtype:'m.text',body:newText},'m.relates_to':{rel_type:'m.replace',event_id:eventId}}); return true; } catch(e) { return false; } }
     async deleteMessage(roomId, eventId) { if (!this.client) return false; try { await this.client.redactEvent(roomId,eventId); return true; } catch(e) { return false; } }
     async markRoomRead(roomId) { if (!this.client||!roomId) return; try { const room = this.client.getRoom(roomId); if (!room) return; const events = room.getLiveTimeline().getEvents(); if (events.length>0) await this.client.sendReadReceipt(events[events.length-1]); } catch(e) {} }
-    async createGroup(name, members=[]) { if (!this.client) return null; try { const resp = await this.client.createRoom({name,preset:'private_chat',visibility:'private',initial_state:[{type:'m.room.guest_access',state_key:'',content:{guest_access:'forbidden'}}],power_level_content_override:{users_default:0,events_default:0,state_default:50,ban:50,kick:50,redact:50,invite:50}}); const roomId = resp.room_id; if (members.length>0) await this._inviteMembers(roomId,members); setTimeout(()=>this.loadRooms(),1000); return roomId; } catch(e) { throw e; } }
+    async createGroup(name, members=[]) { if (!this.client) return null; try { const resp = await this.client.createRoom({name,preset:'private_chat',visibility:'private',initial_state:[{type:'m.room.guest_access',state_key:'',content:{guest_access:'forbidden'}},{type:'sendt.room.type',state_key:'',content:{type:'group'}}],power_level_content_override:{users_default:0,events_default:0,state_default:50,ban:50,kick:50,redact:50,invite:50}}); const roomId = resp.room_id; if (members.length>0) await this._inviteMembers(roomId,members); setTimeout(()=>this.loadRooms(),1500); setTimeout(()=>this.loadRooms(),4000); return roomId; } catch(e) { throw e; } }
     async createChannel(name, description='', isPublic=false) { if (!this.client) return null; try { const opts = {name,topic:description,preset:isPublic?'public_chat':'private_chat',visibility:isPublic?'public':'private',initial_state:[{type:'m.room.guest_access',state_key:'',content:{guest_access:isPublic?'can_join':'forbidden'}}]}; if (isPublic) opts.room_alias_name = name.toLowerCase().replace(/[^a-z0-9]/g,'-').replace(/-+/g,'-'); const resp = await this.client.createRoom(opts); setTimeout(()=>this.loadRooms(),1000); return resp.room_id; } catch(e) { throw e; } }
     async _inviteMembers(roomId, members) { let ok=0,fail=0; for (const m of members) { try { await this.client.invite(roomId,m); ok++; } catch(e) { fail++; } } if (typeof showToast==='function') { if (ok>0) showToast(`${ok} membre(s) invité(s)`,'success'); if (fail>0) showToast(`${fail} invitation(s) échouée(s)`,'warning'); } return {success:ok,failed:fail}; }
     async inviteMember(roomId, userId) { if (!this.client) return false; try { await this.client.invite(roomId,userId); return true; } catch(e) { throw e; } }
@@ -632,7 +851,10 @@ class MatrixManager {
         if (!this.client) throw new Error('Client non connecté');
         try { const dd = this.client.getAccountData('m.direct')?.getContent()||{}; for (const rid of (dd[userId]||[])) { const room = this.client.getRoom(rid); if (room&&room.getMyMembership()==='join') return rid; } } catch(e) {}
         for (const room of this.client.getRooms()) { if (room.getMyMembership()!=='join') continue; const members = room.getJoinedMembers(); if (members.length<=2&&members.some(m=>m.userId===userId)&&this._detectRoomType(room)==='dm') return room.roomId; }
-        const resp = await this.client.createRoom({preset:'trusted_private_chat',invite:[userId],is_direct:true,initial_state:[{type:'m.room.guest_access',state_key:'',content:{guest_access:'forbidden'}}]});
+        const autoEncrypt = this.cryptoEnabled && (typeof CONFIG !== 'undefined' ? CONFIG.E2EE?.autoEncryptDMs : false);
+        const _initState = [{type:'m.room.guest_access',state_key:'',content:{guest_access:'forbidden'}}];
+        if (autoEncrypt) _initState.push({type:'m.room.encryption',state_key:'',content:{algorithm:'m.megolm.v1.aes-sha2'}});
+        const resp = await this.client.createRoom({preset:'trusted_private_chat',invite:[userId],is_direct:true,initial_state:_initState});
         const roomId = resp.room_id;
         try { const currentDMs = this.client.getAccountData('m.direct')?.getContent()||{}; if (!currentDMs[userId]) currentDMs[userId]=[]; if (!currentDMs[userId].includes(roomId)) currentDMs[userId].push(roomId); await this.client.setAccountData('m.direct',currentDMs); } catch(e) {}
         setTimeout(()=>this.loadRooms(),500); setTimeout(()=>this.loadRooms(),2500);
@@ -659,8 +881,9 @@ class MatrixManager {
     mxcToHttpUrl(mxcUrl) { if (!mxcUrl?.startsWith('mxc://')) return null; const sm=mxcUrl.substring(6); return `${this.client.getHomeserverUrl()}/_matrix/client/v1/media/download/${sm}?access_token=${encodeURIComponent(this.client.getAccessToken())}`; }
     mxcToThumbnailUrl(mxcUrl,w=320,h=240) { if (!mxcUrl?.startsWith('mxc://')) return null; const sm=mxcUrl.substring(6); return `${this.client.getHomeserverUrl()}/_matrix/client/v1/media/thumbnail/${sm}?width=${w}&height=${h}&method=scale&access_token=${encodeURIComponent(this.client.getAccessToken())}`; }
     getNotifications() { return this._invitations.map(inv=>({type:'invitation',...inv})); }
-    getCallHistory() { return JSON.parse(localStorage.getItem('sendt_call_history')||'[]'); }
-    addCallToHistory(entry) { const h=this.getCallHistory(); h.unshift({...entry,id:Date.now()}); if (h.length>100) h.splice(100); localStorage.setItem('sendt_call_history',JSON.stringify(h)); window.dispatchEvent(new CustomEvent('call-history-updated')); }
+    _callHistoryKey() { return this.userId ? `sendt_call_history_${this.userId}` : 'sendt_call_history'; }
+    getCallHistory() { return JSON.parse(localStorage.getItem(this._callHistoryKey())||'[]'); }
+    addCallToHistory(entry) { const h=this.getCallHistory(); h.unshift({...entry,id:Date.now()}); if (h.length>100) h.splice(100); localStorage.setItem(this._callHistoryKey(),JSON.stringify(h)); window.dispatchEvent(new CustomEvent('call-history-updated')); }
     setCallActive(roomId) { this._callActive=true; this._activeCallRoomId=roomId; window.dispatchEvent(new CustomEvent('call-started',{detail:{roomId}})); }
     forceEndCall(reason='Connexion perdue') { if (typeof showToast==='function') showToast(reason,'error'); this._stopRinging(); this.clearCallActive(); window.dispatchEvent(new CustomEvent('call-force-ended',{detail:{reason}})); if (typeof uiController!=='undefined') uiController.endCall?.(); }
     endCall() { this.clearCallActive(); }
@@ -683,6 +906,221 @@ class MatrixManager {
     async sendLocation(roomId, lat, lng, description='') { if (!this.client||!roomId) return false; try { await this.client.sendMessage(roomId,{msgtype:'m.location',body:description||`Position: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,geo_uri:`geo:${lat},${lng}`,info:{},'m.location':{uri:`geo:${lat},${lng}`,description}}); return true; } catch(e) { return false; } }
     async startLiveLocation(roomId, durationSeconds) { if (!this.client||!roomId) return false; try { const watchId=navigator.geolocation.watchPosition(async(pos)=>{await this.sendLocation(roomId,pos.coords.latitude,pos.coords.longitude,'Position en direct');},(()=>{}),{enableHighAccuracy:true,maximumAge:10000}); setTimeout(()=>navigator.geolocation.clearWatch(watchId),durationSeconds*1000); return true; } catch(e) { return false; } }
     async logout() { try { this._setOwnPresence('offline'); await new Promise(r=>setTimeout(r,300)); } catch(e) {} if (this._presencePollingInterval) { clearInterval(this._presencePollingInterval); this._presencePollingInterval = null; } try { if (this.client) { await this.client.logout(); this.client.stopClient(); } } catch(e) {} this.client=null; this.userId=null; this.accessToken=null; this._invitations=[]; this._initialSyncComplete=false; this._clientStartTime=null; }
+    async logoutAllDevices() {
+        if (!this.client || !this.accessToken) return { success: false, error: 'Non connecté.' };
+        try {
+            const url = `${this.homeserverUrl}/_matrix/client/v3/account/logout/all`;
+            const r = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' }, body: '{}' });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); return { success: false, error: d.error || `Erreur ${r.status}` }; }
+            return { success: true };
+        } catch(e) { return { success: false, error: e.message || 'Erreur réseau' }; }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // E2EE — Chiffrement de bout en bout
+    // ═══════════════════════════════════════════════════════════════
+
+    // Vérifie si un salon est chiffré
+    isRoomEncrypted(roomId) {
+        if (!this.client || !this.cryptoEnabled || !roomId) return false;
+        try { return this.client.isRoomEncrypted(roomId); } catch(e) { return false; }
+    }
+
+    // Active le chiffrement sur un salon (irréversible)
+    async enableRoomEncryption(roomId) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Le chiffrement E2EE n\'est pas disponible');
+        await this.client.sendStateEvent(roomId, 'm.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, '');
+        return true;
+    }
+
+    // Infos sur l'appareil courant (ID + empreinte Ed25519) — compatible Rust + Legacy
+    getMyDeviceInfo() {
+        if (!this.client || !this.cryptoEnabled) return null;
+        try {
+            const deviceId = this.client.getDeviceId();
+            // Rust crypto : récupérer la clé depuis getCrypto()
+            let ed25519 = null;
+            if (this._cryptoApiVersion === 'rust') {
+                ed25519 = this.client.getCrypto?.()?.getOwnDeviceKeys?.()?.ed25519 || null;
+            }
+            if (!ed25519) ed25519 = this.client.getDeviceEd25519Key?.() || null;
+            const fingerprint = ed25519 ? ed25519.match(/.{1,4}/g).join(' ') : null;
+            return { deviceId, fingerprint, userId: this.userId };
+        } catch(e) { return null; }
+    }
+
+    // Liste les appareils d'un utilisateur (depuis le serveur de clés)
+    getStoredDevicesForUser(userId) {
+        if (!this.client || !this.cryptoEnabled) return [];
+        try { return this.client.getStoredDevicesForUser?.(userId) || []; } catch(e) { return []; }
+    }
+
+    // Marque un appareil comme vérifié / non-vérifié manuellement
+    async verifyDevice(userId, deviceId, verified = true) {
+        if (!this.client || !this.cryptoEnabled) return false;
+        try { await this.client.setDeviceVerified(userId, deviceId, verified); return true; } catch(e) { return false; }
+    }
+
+    // Lance une vérification SAS (emojis) vers un autre utilisateur
+    async requestSASVerification(userId) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        return await this.client.requestVerification(userId);
+    }
+
+    // Lance une vérification SAS dans un salon DM existant
+    async requestSASVerificationInDM(userId, roomId) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        return await this.client.requestVerificationDM(userId, roomId);
+    }
+
+    // ── Sauvegarde des clés (Key Backup) — compatible Rust + Legacy ───────────
+
+    // Helper : retourne l'API crypto (Rust ou Legacy)
+    _getCryptoApi() {
+        if (this._cryptoApiVersion === 'rust') return this.client.getCrypto?.() || null;
+        return null; // Legacy : utiliser this.client directement
+    }
+
+    // Récupère les infos de la sauvegarde actuelle sur le serveur
+    async getKeyBackupInfo() {
+        if (!this.client) return null;
+        try {
+            const api = this._getCryptoApi();
+            if (api?.getKeyBackupInfo) return await api.getKeyBackupInfo();
+            return await this.client.getKeyBackupVersion();
+        } catch(e) { return null; }
+    }
+
+    // Crée une nouvelle sauvegarde protégée par mot de passe (comme Element)
+    async setupKeyBackup(passphrase) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        const api = this._getCryptoApi();
+        if (api?.resetKeyBackup) {
+            // Rust crypto : méthode moderne
+            await api.resetKeyBackup();
+            return { recoveryKey: null }; // la clé est gérée via bootstrapSecretStorage
+        }
+        // Legacy Olm
+        const info = await this.client.prepareKeyBackupVersion(passphrase);
+        await this.client.createKeyBackupVersion(info);
+        await this.client.enableKeyBackup(info);
+        return { recoveryKey: info.recovery_key };
+    }
+
+    // Active la sauvegarde existante sur le serveur
+    async enableExistingKeyBackup() {
+        if (!this.client || !this.cryptoEnabled) return false;
+        try {
+            const api = this._getCryptoApi();
+            if (api?.checkKeyBackupAndEnable) { await api.checkKeyBackupAndEnable(); }
+            else {
+                const backupInfo = await this.client.getKeyBackupVersion();
+                if (!backupInfo) return false;
+                await this.client.enableKeyBackup(backupInfo);
+            }
+            // Uploader TOUTES les sessions locales vers le backup (évite les 404 futurs)
+            try { await this.client.scheduleAllGroupSessionsForBackup?.(); } catch(e) {}
+            return true;
+        } catch(e) { return false; }
+    }
+
+    // Restaure les clés depuis une sauvegarde avec mot de passe — CRUCIAL pour nouvel appareil
+    async restoreKeyBackupWithPassphrase(passphrase) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        const backupInfo = await this.client.getKeyBackupVersion();
+        if (!backupInfo) throw new Error('Aucune sauvegarde trouvée sur le serveur');
+        const result = await this.client.restoreKeyBackupWithPassword(passphrase, null, null, backupInfo, {});
+        // Après restauration, uploader toutes les sessions locales manquantes vers le backup
+        try { await this.client.scheduleAllGroupSessionsForBackup?.(); } catch(e) {}
+        return { imported: result?.imported || 0, total: result?.total || 0 };
+    }
+
+    // ── Export / Import des clés de session ───────────────────────────────
+
+    // Exporte toutes les clés de session en JSON (non chiffré — stocker en lieu sûr)
+    async exportRoomKeysAsJSON() {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        const api = this._getCryptoApi();
+        if (api?.exportRoomKeys) { const keys = await api.exportRoomKeys(); return JSON.stringify(keys, null, 2); }
+        const keys = await this.client.exportRoomKeys();
+        return JSON.stringify(keys, null, 2);
+    }
+
+    // Importe des clés de session depuis un JSON
+    async importRoomKeysFromJSON(json) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        const keys = JSON.parse(json);
+        if (!Array.isArray(keys)) throw new Error('Format invalide');
+        const api = this._getCryptoApi();
+        if (api?.importRoomKeys) { await api.importRoomKeys(keys); return { count: keys.length }; }
+        await this.client.importRoomKeys(keys);
+        return { count: keys.length };
+    }
+
+    // ── Cross-signing (vérification inter-appareils, comme Element) ───────────
+
+    // Vérifie si le cross-signing est configuré sur ce compte
+    async getCrossSigningStatus() {
+        if (!this.client || !this.cryptoEnabled) return null;
+        try {
+            return await this.client.getCrossSigningStatus?.() || null;
+        } catch(e) { return null; }
+    }
+
+    // Configure le cross-signing (crée les clés maîtresses MSK/SSK/USK)
+    // passphrase : utilisé pour SSSS (Secure Secret Storage and Sharing)
+    async bootstrapCrossSigning(passphrase) {
+        if (!this.client || !this.cryptoEnabled) throw new Error('Chiffrement non disponible');
+        // Créer la clé de récupération SSSS (stockage sécurisé des secrets)
+        const recoveryKeyInfo = await this.client.createRecoveryKeyFromPassphrase(passphrase);
+        // Configurer SSSS avec la clé dérivée
+        await this.client.bootstrapSecretStorage({
+            createSecretStorageKey: async () => recoveryKeyInfo,
+            setupNewKeyBackup: true,
+            setupNewSecretStorage: true,
+        });
+        // Configurer le cross-signing en utilisant SSSS pour stocker les clés privées
+        await this.client.bootstrapCrossSigning({
+            authUploadDeviceSigningKeys: async (makeRequest) => {
+                // Authentification UIA nécessaire pour uploader les clés de device signing
+                // On utilise le token d'accès actuel
+                try {
+                    await makeRequest({
+                        type: 'm.login.token',
+                        token: this.accessToken
+                    });
+                } catch(e) {
+                    // Certains serveurs n'exigent pas d'UIA supplémentaire ici
+                }
+            },
+        });
+        return { recoveryKey: recoveryKeyInfo.encodedPrivateKey };
+    }
+
+    // Vérifie si le compte a déjà le cross-signing configuré
+    async isCrossSigningReady() {
+        if (!this.client || !this.cryptoEnabled) return false;
+        try {
+            const keys = await this.client.downloadKeys([this.userId]);
+            const myKeys = keys[this.userId] || {};
+            return Object.keys(myKeys).some(d => {
+                const dev = myKeys[d];
+                return dev?.verified === 1;
+            });
+        } catch(e) { return false; }
+    }
+
+    // Vérifie le statut de cross-signing d'un utilisateur
+    getUserTrustLevel(userId) {
+        if (!this.client || !this.cryptoEnabled) return null;
+        try { return this.client.checkUserTrust?.(userId) || null; } catch(e) { return null; }
+    }
+
+    // Vérifie le statut de confiance d'un appareil spécifique
+    getDeviceTrustLevel(userId, deviceId) {
+        if (!this.client || !this.cryptoEnabled) return null;
+        try { return this.client.checkDeviceTrust?.(userId, deviceId) || null; } catch(e) { return null; }
+    }
 
     // ── Inscription ──
     async register(homeserverUrl, username, password) {
@@ -857,6 +1295,58 @@ class MatrixManager {
             return { success:false, error:'Impossible de joindre le serveur.' };
         }
     }
+
+    // ── Gestion des sessions connectées (comme Element) ───────────────────────
+
+    // Récupère TOUTES les sessions/appareils connectés au compte via l'API Matrix
+    async getAllConnectedDevices() {
+        if (!this.accessToken || !this.homeserverUrl) return [];
+        try {
+            const r = await fetch(`${this.homeserverUrl}/_matrix/client/v3/devices`, {
+                headers: { 'Authorization': `Bearer ${this.accessToken}` }
+            });
+            if (!r.ok) return [];
+            const d = await r.json();
+            const currentDeviceId = this.client?.getDeviceId?.() || null;
+            return (d.devices || []).map(dev => ({
+                deviceId: dev.device_id,
+                displayName: dev.display_name || 'Appareil sans nom',
+                lastSeenTs: dev.last_seen_ts || 0,
+                lastSeen: dev.last_seen_ts ? new Date(dev.last_seen_ts).toLocaleString('fr-FR') : 'Inconnu',
+                lastSeenIp: dev.last_seen_ip || '',
+                isCurrent: dev.device_id === currentDeviceId
+            })).sort((a, b) => b.lastSeenTs - a.lastSeenTs);
+        } catch(e) { return []; }
+    }
+
+    // Déconnecte un appareil spécifique — nécessite le mot de passe (re-auth Matrix)
+    async deleteConnectedDevice(deviceId, password) {
+        if (!this.accessToken || !this.homeserverUrl || !this.userId) return { success:false, error:'Non connecté.' };
+        try {
+            // Étape 1 : découverte UIA — le serveur renvoie 401 + session
+            const url = `${this.homeserverUrl}/_matrix/client/v3/devices/${encodeURIComponent(deviceId)}`;
+            const r1 = await fetch(url, { method:'DELETE', headers:{'Authorization':`Bearer ${this.accessToken}`,'Content-Type':'application/json'}, body:'{}' });
+            if (r1.ok) return { success:true }; // cas rare où aucune auth n'est requise
+            const d1 = await r1.json().catch(() => ({}));
+            if (r1.status !== 401 || !d1.session) return { success:false, error: d1.error || 'Erreur inattendue.' };
+
+            // Étape 2 : re-auth avec mot de passe
+            const r2 = await fetch(url, {
+                method:'DELETE',
+                headers:{'Authorization':`Bearer ${this.accessToken}`,'Content-Type':'application/json'},
+                body: JSON.stringify({ auth: {
+                    type:'m.login.password',
+                    session: d1.session,
+                    identifier:{ type:'m.id.user', user:this.userId },
+                    password
+                }})
+            });
+            if (r2.ok) return { success:true };
+            const d2 = await r2.json().catch(() => ({}));
+            if (r2.status === 401) return { success:false, error:'Mot de passe incorrect.' };
+            return { success:false, error: d2.error || `Erreur ${r2.status}` };
+        } catch(e) { return { success:false, error:'Impossible de joindre le serveur.' }; }
+    }
 }
 const matrixManager = new MatrixManager();
-console.log('✅ matrix-client.js v18.11 — _applyReadReceiptImmediately met à jour _readReceipts cache + DOM complet avec target inclus');
+

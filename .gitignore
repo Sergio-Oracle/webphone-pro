@@ -1,4 +1,4 @@
-# Outils de développement (ne pas partager)
+# Outils de développement
 .vscode/
 .claude/
 *.local.json
@@ -9,8 +9,19 @@
 *.bak
 *.backup
 
+# Secrets — NE JAMAIS committer
+*.env
+.env*
+!*.env.example
+homeserver.yaml
+homeserver.signing.key
+
 # Logs
 *.log
+
+# Node.js (token server)
+node_modules/
+npm-debug.log*
 
 # OS
 .DS_Store

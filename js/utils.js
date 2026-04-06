@@ -279,13 +279,15 @@ const soundManager = new SoundManager();
 // ============================================================================
 class CallHistoryManager {
     constructor() { this.history = this._load(); }
-    _load() { try { return JSON.parse(localStorage.getItem('sendt_call_history')) || []; } catch(e) { return []; } }
-    _save() { if (this.history.length > CONFIG.CALL_HISTORY_MAX) this.history = this.history.slice(0, CONFIG.CALL_HISTORY_MAX); try { localStorage.setItem('sendt_call_history', JSON.stringify(this.history)); } catch(e) {} }
+    _key() { try { const uid = typeof matrixManager !== 'undefined' && matrixManager.userId; return uid ? `sendt_call_history_${uid}` : 'sendt_call_history'; } catch(e) { return 'sendt_call_history'; } }
+    _load() { try { return JSON.parse(localStorage.getItem(this._key())) || []; } catch(e) { return []; } }
+    _save() { if (this.history.length > CONFIG.CALL_HISTORY_MAX) this.history = this.history.slice(0, CONFIG.CALL_HISTORY_MAX); try { localStorage.setItem(this._key(), JSON.stringify(this.history)); } catch(e) {} }
     addEntry(entry) {
+        this.history = this._load();
         this.history.unshift({ id: Date.now() + '_' + Math.random().toString(36).substr(2,6), ...entry, timestamp: entry.timestamp || Date.now() });
         this._save(); window.dispatchEvent(new CustomEvent('call-history-updated'));
     }
-    getHistory() { return this.history; }
+    getHistory() { return this._load(); }
     clearHistory() { this.history = []; this._save(); }
 }
 const callHistoryManager = new CallHistoryManager();
@@ -328,4 +330,4 @@ function toggleEphemeralMenu() {
         menu.classList.add('show');
     }
 }
-console.log(`✅ utils.js v14.0 - ${CONFIG.APP_NAME} ${CONFIG.APP_VERSION}`);
+

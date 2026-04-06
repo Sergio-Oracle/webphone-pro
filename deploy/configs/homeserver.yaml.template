@@ -1,0 +1,86 @@
+# ── Matrix Synapse — Template de configuration ────────────────────────────────
+# Remplacez toutes les valeurs entre {{ }} par vos valeurs réelles.
+# Copiez le résultat vers : /etc/matrix-synapse/homeserver.yaml
+# Générez les secrets avec : openssl rand -hex 32
+
+server_name: "{{ MATRIX_DOMAIN }}"
+pid_file: "/var/run/matrix-synapse.pid"
+
+listeners:
+  - bind_addresses: ["127.0.0.1", "::1"]
+    port: 8008
+    resources:
+      - names: [client, federation]
+        compress: false
+    tls: false
+    type: http
+    x_forwarded: true
+
+# ── Base de données ───────────────────────────────────────────────────────────
+# SQLite (développement / petite instance)
+database:
+  name: sqlite3
+  args:
+    database: /var/lib/matrix-synapse/homeserver.db
+
+# PostgreSQL recommandé pour la production (> 100 utilisateurs)
+# database:
+#   name: psycopg2
+#   args:
+#     host: localhost
+#     port: 5432
+#     database: synapse
+#     user: synapse_user
+#     password: "{{ DB_PASSWORD }}"
+
+log_config: "/etc/matrix-synapse/log.yaml"
+media_store_path: /var/lib/matrix-synapse/media
+signing_key_path: "/etc/matrix-synapse/homeserver.signing.key"
+
+# ── Inscriptions ──────────────────────────────────────────────────────────────
+enable_registration: true
+enable_registration_without_verification: false
+registrations_require_3pid:
+  - email
+registration_shared_secret: "{{ MATRIX_REGISTRATION_SECRET }}"
+
+# ── Mots de passe ─────────────────────────────────────────────────────────────
+password_config:
+  enabled: true
+  minimum_length: 8
+  require_digit: true
+  require_symbol: false
+  require_lowercase: true
+  require_uppercase: false
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+email:
+  smtp_host: smtp.gmail.com       # ou votre serveur SMTP
+  smtp_port: 587
+  smtp_user: "{{ SMTP_USER }}"
+  smtp_pass: "{{ SMTP_PASSWORD }}"
+  require_transport_security: true
+  notif_from: "SENDT <{{ SMTP_USER }}>"
+  app_name: "SENDT"
+  enable_notifs: false
+  subjects:
+    email_validation: "Confirmez votre adresse email — SENDT"
+    password_reset: "Réinitialisation de votre mot de passe — SENDT"
+    email_already_in_use: "Votre adresse email est déjà utilisée — SENDT"
+
+# ── Serveurs TURN (pour WebRTC en relais) ─────────────────────────────────────
+# Optionnel — amélore la connectivité en environnement réseau restrictif
+# turn_uris:
+#   - "turn:turn.votre-domaine.com:3478?transport=udp"
+#   - "turn:turn.votre-domaine.com:3478?transport=tcp"
+#   - "turns:turn.votre-domaine.com:5349?transport=tcp"
+# turn_shared_secret: "{{ TURN_SHARED_SECRET }}"
+# turn_user_lifetime: 86400000
+# turn_allow_guests: true
+
+# ── Fédération ────────────────────────────────────────────────────────────────
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+# Désactiver la fédération (réseau fermé)
+# federation_domain_whitelist: []

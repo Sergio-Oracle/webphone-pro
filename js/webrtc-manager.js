@@ -304,26 +304,6 @@ class WebRTCManager {
             return false;
         }
     }
-    // ═══════════════ JWT NATIF ═══════════════
-    _b64url(bytes) {
-        return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
-    async _generateLiveKitToken(roomName, identity) {
-        if (!CONFIG.LIVEKIT.API_KEY || !CONFIG.LIVEKIT.API_SECRET) throw new Error('Clés API LiveKit manquantes');
-        const enc = new TextEncoder(); const now = Math.floor(Date.now() / 1000);
-        const h = this._b64url(enc.encode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
-        const p = this._b64url(enc.encode(JSON.stringify({
-            iss: CONFIG.LIVEKIT.API_KEY, sub: identity,
-            iat: now, exp: now + 3600, name: identity,
-            video: { roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true }
-        })));
-        const input = `${h}.${p}`;
-        const key = await crypto.subtle.importKey('raw', enc.encode(CONFIG.LIVEKIT.API_SECRET),
-            { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-        const signature = this._b64url(await crypto.subtle.sign('HMAC', key, enc.encode(input)));
-        return `${input}.${signature}`;
-    }
     // ═══════════════ GROUP CALL ═══════════════
     async startGroupCall(roomId, withVideo = false, callId = null) {
         try {
@@ -342,18 +322,16 @@ class WebRTCManager {
             const livekitRoomName = callId;
             let token = null;
             const ep = CONFIG.LIVEKIT.TOKEN_ENDPOINT;
-            if (ep && ep.startsWith('http')) {
-                try {
-                    const res = await fetch(`${ep}?room=${encodeURIComponent(livekitRoomName)}`);
-                    const ct = res.headers.get('content-type') || '';
-                    if (res.ok && ct.includes('application/json')) { const d = await res.json(); if (d.token) token = d.token; }
-                } catch(e) { console.warn('[LiveKit] Backend token error:', e.message); }
-            }
-            if (!token) {
-                if (CONFIG.LIVEKIT.API_KEY && CONFIG.LIVEKIT.API_SECRET) {
-                    token = await this._generateLiveKitToken(livekitRoomName, matrixManager.getUserId() || 'anonymous');
-                } else { if (typeof showToast === 'function') showToast('Configuration LiveKit incomplète', 'error'); return false; }
-            }
+            try {
+                const matrixToken = matrixManager.getAccessToken?.() || matrixManager.accessToken || '';
+                const res = await fetch(`${ep}?room=${encodeURIComponent(livekitRoomName)}`, {
+                    headers: { 'Authorization': `Bearer ${matrixToken}` }
+                });
+                const ct = res.headers.get('content-type') || '';
+                if (res.ok && ct.includes('application/json')) { const d = await res.json(); if (d.token) token = d.token; }
+                if (!res.ok) console.warn('[LiveKit] Backend token error:', res.status);
+            } catch(e) { console.warn('[LiveKit] Backend token fetch error:', e.message); }
+            if (!token) { if (typeof showToast === 'function') showToast('Impossible d\'obtenir le token d\'appel. Réessayez.', 'error'); return false; }
             if (isInitiator) await this._sendGroupCallNotification(roomId, withVideo, callId, livekitRoomName);
             this.currentCall = { callId, roomId, isGroup: true, livekitRoomName };
             this._callConnectedAt = Date.now(); // ✅ timestamp pour filtrer les anciens hangup
@@ -1651,25 +1629,25 @@ class WebRTCManager {
         }
     }
     async sendCallInvite(roomId, offer, meta) {
-        const cl = matrixManager.getClient(); if (!cl) return;
+        if (!matrixManager.getClient()) return;
         const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         this.currentCall = { callId, roomId };
         const c = { call_id: callId, version: 1, lifetime: 60000, offer: { type: 'offer', sdp: offer.sdp } };
         if (meta) c.sdp_stream_metadata = meta;
-        await cl.sendEvent(roomId, 'm.call.invite', c);
+        // Envoi sans chiffrement pour éviter les délais de déchiffrement qui font rater les appels
+        await matrixManager.sendCallEvent(roomId, 'm.call.invite', c);
     }
     async sendCallAnswer(answer, meta) {
-        const cl = matrixManager.getClient(); if (!cl || !this.currentCall) return;
+        if (!matrixManager.getClient() || !this.currentCall) return;
         const c = { call_id: this.currentCall.callId, version: 1, answer: { type: 'answer', sdp: answer.sdp } };
         if (meta) c.sdp_stream_metadata = meta;
-        await cl.sendEvent(this.currentCall.roomId, 'm.call.answer', c);
+        await matrixManager.sendCallEvent(this.currentCall.roomId, 'm.call.answer', c);
     }
     async sendIceCandidatesBatch() {
-        const cl = matrixManager.getClient();
-        if (!cl || !this.currentCall || !this.iceCandidatesQueue.length) { this.iceSendTimeout = null; return; }
+        if (!matrixManager.getClient() || !this.currentCall || !this.iceCandidatesQueue.length) { this.iceSendTimeout = null; return; }
         const cands = [...this.iceCandidatesQueue]; this.iceCandidatesQueue = []; this.iceSendTimeout = null;
         try {
-            await cl.sendEvent(this.currentCall.roomId, 'm.call.candidates', {
+            await matrixManager.sendCallEvent(this.currentCall.roomId, 'm.call.candidates', {
                 call_id: this.currentCall.callId, version: 1,
                 candidates: cands.map(c => ({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }))
             });
@@ -1721,8 +1699,7 @@ class WebRTCManager {
         }
         if (this.currentCall?.isGroup) this._sendGroupCallEndNotification();
         else if (this.currentCall) {
-            const cl = matrixManager.getClient();
-            if (cl) cl.sendEvent(this.currentCall.roomId, 'm.call.hangup',
+            matrixManager.sendCallEvent(this.currentCall.roomId, 'm.call.hangup',
                 { call_id: this.currentCall.callId, version: 1, reason: 'user_hangup' }).catch(() => {});
         }
         this.cleanup();
@@ -1813,4 +1790,4 @@ const webrtcManager = new WebRTCManager();
         } else if (origDecline) origDecline();
     };
 })();
-console.log('✅ webrtc-manager.js v15.8 — Screen share vidéo définitif: getUserMedia frais + onunmute listener B, receipts propagation');
+

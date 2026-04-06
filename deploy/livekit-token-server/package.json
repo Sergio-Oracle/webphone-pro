@@ -1,0 +1,16 @@
+{
+  "name": "livekit-token-server",
+  "version": "1.0.0",
+  "description": "SENDT LiveKit JWT token server — proxied by Nginx",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

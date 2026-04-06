@@ -1,227 +1,161 @@
-# 🚀 MATRIXPHONE - GUIDE DE DÉMARRAGE RAPIDE
+# SENDT Webphone Pro — Guide de démarrage rapide
 
-## Installation en 5 minutes
+Pour les développeurs qui veulent déployer en **moins de 30 minutes**.
 
-### 📦 Étape 1 : Extraire les fichiers
+---
+
+## Ce dont vous avez besoin avant de commencer
+
+- [ ] Un serveur Ubuntu 22.04 avec accès root
+- [ ] Deux sous-domaines DNS configurés (ex: `app.exemple.com` et `matrix.exemple.com`) pointant vers votre serveur
+- [ ] Un compte [LiveKit Cloud](https://livekit.io) (gratuit) avec votre API Key et API Secret
+- [ ] Un compte email SMTP (Gmail, etc.) pour les confirmations d'inscription
+
+---
+
+## Installation en 3 commandes
 
 ```bash
-# Sur votre serveur
-cd /var/www/html/
-unzip MatrixPhone_Professional.zip
+git clone https://github.com/Sergio-Oracle/webphone-pro.git
 cd webphone-pro
+sudo bash deploy/install.sh
 ```
 
-### ⚙️ Étape 2 : Configuration minimale
+Répondez aux questions du script. Attendez 10–20 minutes. C'est tout.
 
-Éditer `js/config.js` :
+---
 
+## Vérification post-installation
+
+```bash
+# 1. Matrix API répond ?
+curl https://matrix.votre-domaine.com/_matrix/client/versions
+# Attendu : {"versions":["r0.0.1", ...]}
+
+# 2. Application accessible ?
+curl -I https://telephone.votre-domaine.com
+# Attendu : HTTP/2 200
+
+# 3. Token server répond ?
+curl https://telephone.votre-domaine.com/api/connection-details
+# Attendu : {"error":"Unauthorized..."} (normal sans token Matrix)
+
+# 4. Services actifs ?
+sudo systemctl status nginx matrix-synapse livekit-token-server fail2ban
+```
+
+---
+
+## Créer le premier compte administrateur
+
+```bash
+sudo register_new_matrix_user \
+    -c /etc/matrix-synapse/homeserver.yaml \
+    https://matrix.votre-domaine.com
+```
+
+Le script demande : nom d'utilisateur, mot de passe, admin (yes).
+
+---
+
+## Configuration minimale requise
+
+Après le script, vérifiez et adaptez ces 3 fichiers si nécessaire :
+
+**`/var/www/html/webphone-pro/js/config.js`**
 ```javascript
-const CONFIG = {
-    DEFAULT_HOMESERVER: 'https://jn.rtn.sn',  // ← Votre serveur Matrix
-    ICE_SERVERS: [
-        { urls: 'stun:stun.l.google.com:19302' }
-    ]
-};
+DEFAULT_HOMESERVER: 'https://matrix.votre-domaine.com',
+DEFAULT_DOMAIN: 'matrix.votre-domaine.com',
+LIVEKIT: {
+    URL: 'wss://livekit.votre-domaine.com',
+    TOKEN_ENDPOINT: 'https://telephone.votre-domaine.com/api/connection-details',
+},
 ```
 
-### 🌐 Étape 3 : Déploiement
-
-**Option A : Serveur Apache/Nginx (Production)**
-
-```nginx
-# /etc/nginx/sites-available/matrixphone.conf
-server {
-    listen 443 ssl http2;
-    server_name phone.votre-domaine.com;
-    
-    ssl_certificate /etc/letsencrypt/live/phone.votre-domaine.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/phone.votre-domaine.com/privkey.pem;
-    
-    root /var/www/html/webphone-pro;
-    index index.html;
-    
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
+**`/opt/livekit-token-server/.env`**
+```ini
+LIVEKIT_API_KEY=your_key
+LIVEKIT_API_SECRET=your_secret
+LIVEKIT_URL=wss://livekit.votre-domaine.com
+MATRIX_HOMESERVER=https://matrix.votre-domaine.com
 ```
+
+Après modification du `.env` :
+```bash
+sudo systemctl restart livekit-token-server
+```
+
+---
+
+## Structure des fichiers déployés
+
+```
+/var/www/html/webphone-pro/     # Frontend SPA
+    js/config.js                # Configuration des URLs (à adapter)
+    js/matrix-client.js         # Logique Matrix/E2EE
+    js/app.js                   # Application principale
+    vendor/olm.js + olm.wasm    # Librairie E2EE Olm
+
+/opt/livekit-token-server/      # Serveur de tokens LiveKit
+    server.js                   # Code Node.js
+    .env                        # Secrets (chmod 600)
+
+/etc/matrix-synapse/            # Configuration Matrix Synapse
+    homeserver.yaml             # Config principale (contient les secrets)
+
+/etc/nginx/sites-available/     # Configuration Nginx
+    webphone.conf               # Vhosts avec SSL et rate limiting
+
+/etc/fail2ban/                  # Protection brute-force
+    jail.d/sendt.conf
+```
+
+---
+
+## Commandes utiles
 
 ```bash
-# Activer et redémarrer
-sudo ln -s /etc/nginx/sites-available/matrixphone.conf /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
+# Redémarrer tous les services
+sudo systemctl restart nginx matrix-synapse livekit-token-server
+
+# Voir les logs en temps réel
+sudo journalctl -u matrix-synapse -u livekit-token-server -f
+
+# Mettre à jour l'application
+sudo git pull && sudo systemctl reload nginx
+
+# Renouveler les certificats SSL (normalement automatique)
+sudo certbot renew && sudo systemctl reload nginx
+
+# Voir les IPs bannies
+sudo fail2ban-client status matrix-synapse
 ```
 
-**Option B : Serveur Python (Développement)**
+---
 
+## Résolution rapide des problèmes courants
+
+**Erreur 502 Bad Gateway** → Synapse ou le token server n'est pas démarré
 ```bash
-cd webphone-pro
-python3 -m http.server 8000
+sudo systemctl start matrix-synapse livekit-token-server
 ```
 
-Puis ouvrir : `http://localhost:8000`
-
-⚠️ **IMPORTANT** : WebRTC nécessite HTTPS en production !
-
-### 🎯 Étape 4 : Tester
-
-1. Ouvrir dans le navigateur : `https://phone.votre-domaine.com`
-2. Entrer vos identifiants Matrix
-3. Ajouter un contact
-4. Passer votre premier appel !
-
----
-
-## 📞 Premier appel en 3 étapes
-
-### 1️⃣ Connexion
-- Serveur : `https://jn.rtn.sn`
-- Identifiant : `@votre-user:jn.rtn.sn`
-- Mot de passe : `votre-mot-de-passe`
-
-### 2️⃣ Ajouter un contact
-- Cliquer sur le bouton `+`
-- Entrer : `@contact:jn.rtn.sn`
-- Sauvegarder
-
-### 3️⃣ Appeler
-- Sélectionner le contact
-- Cliquer sur "Vidéo" ou "Audio"
-- Attendre la connexion
-- Profitez de votre appel chiffré !
-
----
-
-## 🔧 Dépannage rapide
-
-### ❌ Pas de vidéo
-```
-1. Autoriser caméra/micro dans le navigateur
-2. Vérifier HTTPS activé
-3. F12 → Console → Vérifier les erreurs
-```
-
-### ❌ Connexion impossible
-```
-1. Vérifier serveur Matrix accessible
-2. Vérifier identifiants corrects
-3. Vérifier CORS configuré
-```
-
-### ❌ Appel ne se connecte pas
-```
-1. Vérifier les deux clients connectés
-2. Ajouter un serveur TURN si NAT
-3. chrome://webrtc-internals → Vérifier ICE
-```
-
----
-
-## 🎨 Interface
-
-### Style WhatsApp Dark
-- ✅ Sidebar avec liste de contacts
-- ✅ Zone principale pour les appels
-- ✅ Écran d'appel immersif
-- ✅ Contrôles intuitifs
-- ✅ Notifications toast
-
-### Fonctionnalités
-- ✅ Appels audio/vidéo HD
-- ✅ Chiffrement E2EE
-- ✅ Gestion contacts
-- ✅ Historique d'appels
-- ✅ Paramètres personnalisables
-
----
-
-## 📱 Utilisation
-
-### Contrôles pendant l'appel
-
-| Bouton | Action |
-|--------|--------|
-| 🎤 | Couper/activer le micro |
-| 📹 | Couper/activer la vidéo |
-| 🔴 | Raccrocher |
-| ⛶ | Plein écran |
-| ⚙️ | Paramètres |
-
-### Raccourcis clavier
-- `Ctrl+M` : Mute/Unmute micro
-- `Ctrl+E` : Activer/Désactiver vidéo
-- `Ctrl+H` : Raccrocher
-- `F11` : Plein écran
-
----
-
-## 🔐 Sécurité
-
-### Chiffrement
-✅ WebRTC : DTLS/SRTP automatique  
-✅ Matrix : E2EE avec Olm/Megolm  
-✅ HTTPS : Transport sécurisé  
-
-### Confidentialité
-✅ Appels P2P (direct entre clients)  
-✅ Pas de stockage serveur  
-✅ Authentification par token  
-
----
-
-## 📊 Performance
-
-### Qualité recommandée
-
-| Réseau | Qualité vidéo |
-|--------|---------------|
-| Fibre/4G | Full HD (1080p) |
-| ADSL | HD (720p) |
-| 3G | SD (480p) |
-
-### Bande passante
-
-| Type d'appel | Minimum | Recommandé |
-|--------------|---------|------------|
-| Audio seul | 64 kbps | 128 kbps |
-| Vidéo SD | 500 kbps | 1 Mbps |
-| Vidéo HD | 1.5 Mbps | 3 Mbps |
-| Vidéo Full HD | 3 Mbps | 5 Mbps |
-
----
-
-## 🆘 Support
-
-### Logs
+**Erreur de certificat SSL** → Les DNS ne pointaient pas encore vers ce serveur
 ```bash
-# Console navigateur
-F12 → Console
-
-# WebRTC internals
-chrome://webrtc-internals
-firefox: about:webrtc
+sudo certbot certonly --nginx -d app.exemple.com -d matrix.exemple.com
 ```
 
-### Ressources
-- [Documentation Matrix](https://spec.matrix.org/)
-- [Guide WebRTC](https://webrtc.org/getting-started/overview)
-- [Matrix JS SDK](https://matrix-org.github.io/matrix-js-sdk/)
+**"Impossible de joindre le serveur"** → `config.js` n'a pas été mis à jour
+```bash
+sudo nano /var/www/html/webphone-pro/js/config.js
+```
+
+**Les appels ne fonctionnent pas** → Vérifier la clé LiveKit dans `.env`
+```bash
+sudo cat /opt/livekit-token-server/.env
+sudo journalctl -u livekit-token-server -n 30
+```
 
 ---
 
-## ✅ Checklist de déploiement
-
-- [ ] Fichiers extraits
-- [ ] config.js configuré
-- [ ] HTTPS activé
-- [ ] Certificat SSL valide
-- [ ] Serveur Matrix accessible
-- [ ] Permissions navigateur acceptées
-- [ ] Test d'appel réussi
-
----
-
-**🎉 Vous êtes prêt ! Bon appel !**
-
-Pour plus de détails, consultez le [README.md](README.md) complet.
+Pour la documentation complète, voir [README.md](README.md).

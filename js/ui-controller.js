@@ -249,14 +249,21 @@ class UIController {
             const initial = m.displayName.charAt(0).toUpperCase();
             const colors = ['#25D366','#128C7E','#4facfe','#f093fb','#ffa726','#e74c3c','#9b59b6'];
             const bg = colors[m.userId.charCodeAt(1) % colors.length];
-            return `<div class="mention-item" data-userid="${this.sanitize(m.userId)}" data-name="${this.sanitize(m.displayName)}"
-                onmousedown="event.preventDefault();uiController._insertMention('${this.sanitize(m.userId)}','${this.sanitize(m.displayName).replace(/'/g,'\\\'')}')"
-                >
+            // data-userid et data-name sont utilisés par l'event listener — pas d'inline handler
+            return `<div class="mention-item" data-userid="${this.sanitize(m.userId)}" data-name="${this.sanitize(m.displayName)}">
                 <span class="mention-avatar" style="background:${bg}">${initial}</span>
                 <span class="mention-name">${this.sanitize(m.displayName)}</span>
                 <span class="mention-uid">${this.sanitize(m.userId.split(':')[0])}</span>
             </div>`;
         }).join('');
+
+        // Event listener centralisé sur le conteneur (délégation)
+        dd.onmousedown = (e) => {
+            const item = e.target.closest('.mention-item');
+            if (!item) return;
+            e.preventDefault();
+            this._insertMention(item.dataset.userid, item.dataset.name);
+        };
 
         // Positionner au-dessus du champ de saisie
         const inp = document.getElementById('chat-input');
@@ -1615,12 +1622,13 @@ class UIController {
         if (allContacts.length) {
             if (allGroups.length) html += `<div class="section-label" style="padding:6px 14px;font-size:0.72rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em">Contacts</div>`;
             html += allContacts.map(ct => {
+                if (!ct.userId) return '';
                 const n  = this.sanitize(ct.displayName);
                 const u  = this.sanitize(ct.userId);
                 const safeId  = ct.userId.replace(/[^a-zA-Z0-9]/g, '_');
                 const lastMsg  = ct.lastMessage ? this.sanitize(ct.lastMessage) : '';
                 const lastTime = ct.lastMessageTime ? formatTime(ct.lastMessageTime) : '';
-                const initial  = ct.displayName.charAt(0).toUpperCase();
+                const initial  = (ct.displayName || ct.userId).charAt(0).toUpperCase();
                 const colors   = ['#25D366', '#128C7E', '#075E54', '#4facfe', '#f093fb', '#f5576c', '#ffa726'];
                 const bgColor  = colors[initial.charCodeAt(0) % colors.length];
                 const presData = this._presenceMap[ct.userId];
@@ -1734,6 +1742,8 @@ class UIController {
             if (nameEl) nameEl.textContent = channel.displayName;
             if (idEl)   idEl.textContent   = `${channel.memberCount || 0} membres • ${channel.isPublic ? 'public' : 'privé'}`;
             if (idEl)   idEl.style.color   = '';
+            if (typeof _updateE2EELockIcon === 'function') _updateE2EELockIcon();
+            this._renderChannelManagementBar(roomId);
         }
         this.cancelReply();
         // ✅ v15.9 : Réattacher le listener de mention pour ce nouveau contexte
@@ -1756,6 +1766,7 @@ class UIController {
             if (nameEl) nameEl.textContent = group.displayName;
             if (idEl)   idEl.textContent   = `${group.memberCount || 0} membres`;
             if (idEl)   idEl.style.color   = '';
+            if (typeof _updateE2EELockIcon === 'function') _updateE2EELockIcon();
             const chatHeader = document.querySelector('#contact-view .chat-header');
             if (chatHeader) {
                 chatHeader.style.cursor = 'pointer';
@@ -1899,8 +1910,23 @@ class UIController {
         if (chatHeader) chatHeader.parentNode.insertBefore(bar, chatHeader.nextSibling);
     }
 
+    _renderChannelManagementBar(roomId) {
+        document.getElementById('group-mgmt-bar')?.remove();
+        const bar = document.createElement('div');
+        bar.id = 'group-mgmt-bar';
+        bar.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 12px;background:rgba(0,133,63,.08);border-bottom:1px solid rgba(0,133,63,.15);flex-wrap:wrap;';
+        bar.innerHTML = `
+            <button class="icon-btn-small" style="color:var(--sn-green)" onclick="uiController.showInviteMemberDialog()" title="Inviter"><i class="fas fa-user-plus"></i></button>
+            <span style="font-size:.72rem;color:var(--text-muted)">Inviter</span>
+            <span style="margin:0 4px;color:var(--text-muted)">·</span>
+            <button class="icon-btn-small" style="color:#ffa726" onclick="matrixManager.leaveRoom(uiController.currentContact.roomId).then(()=>{uiController.channels=uiController.channels.filter(c=>c.roomId!==uiController.currentContact.roomId);uiController.renderChannels();uiController.currentContact=null;document.getElementById('group-mgmt-bar')?.remove();document.getElementById('contact-view')?.classList.add('hidden');document.getElementById('welcome-screen')?.classList.remove('hidden');})" title="Quitter"><i class="fas fa-sign-out-alt"></i></button>
+            <span style="font-size:.72rem;color:var(--text-muted)">Quitter</span>`;
+        const chatHeader = document.querySelector('#contact-view .chat-header');
+        if (chatHeader) chatHeader.parentNode.insertBefore(bar, chatHeader.nextSibling);
+    }
+
     showInviteMemberDialog() {
-        if (!this.currentContact?.isGroup) return;
+        if (!this.currentContact?.isGroup && !this.currentContact?.isChannel) return;
         let currentMemberIds = new Set();
         try {
             const cl = matrixManager.getClient();
@@ -1931,7 +1957,7 @@ class UIController {
 
         modal.innerHTML = `
         <div class="modal-content" style="max-width:440px">
-            <div class="modal-header"><h3><i class="fas fa-user-plus"></i> Inviter dans le groupe</h3><button class="close-btn" onclick="closeModal('invite-member-modal')"><i class="fas fa-times"></i></button></div>
+            <div class="modal-header"><h3><i class="fas fa-user-plus"></i> Inviter dans le ${this.currentContact?.isChannel ? 'salon' : 'groupe'}</h3><button class="close-btn" onclick="closeModal('invite-member-modal')"><i class="fas fa-times"></i></button></div>
             <div class="modal-body">
                 ${contactSuggestions}
                 <div class="form-group">
@@ -1955,7 +1981,7 @@ class UIController {
     }
 
     async confirmInviteMember() {
-        if (!this.currentContact?.isGroup) return;
+        if (!this.currentContact?.isGroup && !this.currentContact?.isChannel) return;
         const rawInput = document.getElementById('invite-member-id')?.value.trim();
         const errEl    = document.getElementById('invite-member-error');
         const btn      = document.getElementById('invite-confirm-btn');
@@ -2060,6 +2086,8 @@ class UIController {
                 const isOnline = this._presenceMap[userId]?.presence === 'online';
                 idEl.style.color = isOnline ? 'var(--sn-green,#25D366)' : '';
             }
+            // E2EE : afficher le cadenas si la conversation est chiffrée
+            if (typeof _updateE2EELockIcon === 'function') _updateE2EELockIcon();
         }
         if (this._presenceRefreshInterval) clearInterval(this._presenceRefreshInterval);
         this._presenceRefreshInterval = setInterval(() => {
@@ -2568,6 +2596,8 @@ class UIController {
                 : '<div class="empty-chat"><i class="fas fa-comments"></i><p>Aucun message</p><span>Envoyez un message pour démarrer</span></div>';
             return;
         }
+        // E2EE : vérifier si le salon est chiffré une seule fois avant la boucle
+        const isRoomE2EE = matrixManager.isRoomEncrypted?.(rid) || false;
         let html = '', lastDateStr = '';
         msgs.forEach((msg, i) => {
             const dateStr = formatDateGroup(msg.timestamp);
@@ -2620,7 +2650,11 @@ class UIController {
             const msgReactions = (msg.eventId && reactions[msg.eventId]) ? reactions[msg.eventId] : null;
             const reactHtml = msgReactions ? `<div class="msg-reactions" data-eid="${msg.eventId}">${Object.entries(msgReactions).map(([e, users]) => `<span class="msg-reaction" title="${users.map(u=>this._resolveDisplayName(u)).join(', ')}" onclick="uiController._sendReaction('${msg.eventId}','${e}')">${e}<span class="msg-reaction-count">${users.length > 1 ? users.length : ''}</span></span>`).join('')}</div>` : '';
             const ctxData = JSON.stringify({ eventId: msg.eventId, type: msg.type, message: msg.message, isOwn: msg.isOwn, sender: msg.sender, mxcUrl: msg.mxcUrl, audioDuration: msg.audioDuration }).replace(/"/g, '&quot;');
-            html += `<div class="chat-message ${o}" data-msg-id="${id}" data-event-id="${msg.eventId || ''}" oncontextmenu="uiController.showMessageContextMenu(event,${ctxData})"><div class="msg-bubble">${pinIcon}${senderHtml}${replyH}<div class="msg-body">${this._renderContent(msg, i)}</div><div class="msg-footer">${ephemeralBadge}${editBadge}${starIcon}<span class="msg-time">${t}</span>${ticks}</div>${reactHtml}</div></div>`;
+            // E2EE : cadenas par message — vert si chiffré OK, rouge si échec de déchiffrement
+            const e2eeIcon = msg.decryptError
+                ? '<i class="fas fa-lock msg-e2ee-icon error" title="Impossible à déchiffrer — clé manquante sur cet appareil"></i>'
+                : isRoomE2EE ? '<i class="fas fa-lock msg-e2ee-icon" title="Chiffré de bout en bout"></i>' : '';
+            html += `<div class="chat-message ${o}" data-msg-id="${id}" data-event-id="${msg.eventId || ''}" oncontextmenu="uiController.showMessageContextMenu(event,${ctxData})"><div class="msg-bubble">${pinIcon}${senderHtml}${replyH}<div class="msg-body">${this._renderContent(msg, i)}</div><div class="msg-footer">${ephemeralBadge}${editBadge}${starIcon}<span class="msg-time">${t}</span>${e2eeIcon}${ticks}</div>${reactHtml}</div></div>`;
         });
         cc.innerHTML = html; cc.scrollTop = cc.scrollHeight;
     }
@@ -2629,6 +2663,11 @@ class UIController {
     // ✅ v15.9 : _renderContent — texte → Markdown, reste inchangé
     // ═══════════════════════════════════════════════════════
     _renderContent(msg, i) {
+        // ── E2EE : message chiffré non déchiffrable (nouvel appareil sans les clés) ──
+        // Exactement comme Element : affiche "🔒 impossible à déchiffrer"
+        if (msg.decryptError || msg.type === 'decrypt-error') {
+            return `<div class="msg-decrypt-error"><i class="fas fa-lock"></i> Message chiffré — impossible à déchiffrer sur cet appareil. <span style="font-size:.75rem;opacity:.7">Restaurez vos clés dans Paramètres → Sécurité pour accéder à vos anciens messages.</span></div>`;
+        }
         if (msg.isViewOnce) {
             const opened = this._viewOnceOpened?.[msg.eventId];
             if (!opened) {
@@ -3070,4 +3109,4 @@ class UIController {
 }
 
 const uiController = new UIController();
-console.log('✅ ui-controller.js v15.9 — Markdown (gras/italique/code/blocs/citations/mentions) + dropdown @ mentions groupes WhatsApp-like');
+
