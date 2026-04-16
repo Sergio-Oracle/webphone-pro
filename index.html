@@ -1055,7 +1055,7 @@
                     <i class="fas fa-key" style="color:#00853F"></i> Token d'accès
                 </h4>
                 <p style="color:#8696A0;font-size:.82rem;line-height:1.55;margin-bottom:12px;">
-                    Token de session courant. Utilisez-le pour des intégrations API ou outils tiers Matrix.
+                    Token de la session en cours dans cette application. Copiez-le pour l'utiliser directement dans vos appels API — il ne crée pas de nouvelle session.
                 </p>
                 <div style="position:relative;margin-bottom:10px;">
                     <input type="password" id="access-token-field" readonly
@@ -1070,10 +1070,13 @@
                         <i class="fas fa-copy"></i>
                     </button>
                 </div>
-                <!-- Commande curl équivalente -->
-                <div style="background:#0D1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px 36px 12px 12px;position:relative;">
-                    <div style="font-size:.68rem;color:#8696A0;margin-bottom:5px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;">
-                        <i class="fas fa-terminal" style="margin-right:5px;"></i>Commande pour générer un token
+                <!-- Commande curl — nouvelle session -->
+                <div style="background:#0D1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px 36px 12px 12px;position:relative;margin-top:8px;">
+                    <div style="font-size:.68rem;color:#8696A0;margin-bottom:3px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;">
+                        <i class="fas fa-terminal" style="margin-right:5px;"></i>Créer une nouvelle session indépendante (token différent)
+                    </div>
+                    <div style="font-size:.7rem;color:#E9A11B;margin-bottom:6px;">
+                        ⚠️ Chaque appel à /login crée un nouveau token et un nouvel appareil dans votre compte.
                     </div>
                     <code id="token-curl-cmd" style="font-size:.72rem;color:#58A6FF;word-break:break-all;line-height:1.65;display:block;white-space:pre-wrap;"></code>
                     <button type="button" onclick="copyCurlCommand()"
