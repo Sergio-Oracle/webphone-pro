@@ -82,15 +82,37 @@ class MatrixManager {
 
 
     // ── Connexion par token SSO (plugin Moodle) ─────────────────────────────────
-    async loginWithToken(homeserverUrl, userId, accessToken) {
+    //
+    // FIX v19.10 — deux corrections critiques par rapport à la version précédente :
+    //
+    // 1. device_id STABLE : l'ancienne version ajoutait Date.now() ce qui créait un
+    //    nouveau device à chaque connexion. Le PHP (lib.php) et ici utilisent la même
+    //    formule : MOODLE_ + 8 premiers chars alphanumériques du userId en majuscules.
+    //    Synapse reconnaît ainsi le même device entre les sessions.
+    //
+    // 2. E2EE DÉSACTIVÉ pour les sessions SSO : les tokens générés via l'API admin
+    //    Synapse (POST /_synapse/admin/v1/users/{id}/login) n'ont pas de contexte
+    //    device_id côté Synapse → 400 "must pass device_id" sur /keys/upload.
+    //    Le chat reste protégé par TLS. L'E2EE manuel reste disponible pour les
+    //    sessions normales (login/password).
+    //
+    // @param {string} homeserverUrl   URL base du homeserver, ex. https://matrix.example.com
+    // @param {string} userId          Matrix user ID, ex. @john:example.com
+    // @param {string} accessToken     Token généré par Synapse admin API
+    // @param {string} [deviceId]      ID de device stable (facultatif, calculé si absent)
+    async loginWithToken(homeserverUrl, userId, accessToken, deviceId) {
         try {
             const sdk = this._getSDK();
             if (!sdk) throw new Error("Matrix SDK non charge");
             this.homeserverUrl = homeserverUrl;
             this.userId        = userId;
             this.accessToken   = accessToken;
-            const tag          = userId.replace(/[^A-Z0-9]/gi,"").substring(0,8).toUpperCase();
-            const deviceId     = "MOODLE_" + tag + "_" + Date.now().toString(36).toUpperCase();
+
+            // Stable device_id — même formule que le PHP côté Moodle
+            if (!deviceId) {
+                const tag = userId.replace(/[^A-Z0-9]/gi,"").substring(0,8).toUpperCase();
+                deviceId  = "MOODLE_" + tag;
+            }
 
             let mainStore;
             try {
@@ -102,18 +124,17 @@ class MatrixManager {
                 await mainStore.startup();
             } catch(e) { mainStore = undefined; }
 
-            const cryptoStore = sdk.IndexedDBCryptoStore
-                ? new sdk.IndexedDBCryptoStore(window.indexedDB, "sendt:crypto")
-                : undefined;
-
             this.client = sdk.createClient({
                 baseUrl: homeserverUrl, accessToken: this.accessToken,
                 userId: this.userId, deviceId, timelineSupport: true,
-                ...(mainStore   ? { store: mainStore } : {}),
-                ...(cryptoStore ? { cryptoStore }      : {}),
+                ...(mainStore ? { store: mainStore } : {}),
+                // Pas de cryptoStore : E2EE volontairement désactivé pour SSO
             });
 
-            await this._initCrypto();
+            // E2EE désactivé pour les sessions SSO (token admin Synapse).
+            // Évite les erreurs 400 keys/upload "must pass device_id".
+            this.cryptoEnabled = false;
+
             try { const p = await this.client.getProfileInfo(this.userId); this._profile = p || {}; } catch(e) {}
             await this.startSync();
             return { success: true, userId: this.userId };

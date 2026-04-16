@@ -1,0 +1,146 @@
+# ── SENDT Webphone Pro — nginx configuration example ─────────────────────────
+#
+# This file is a template. Replace the following placeholders:
+#   YOUR_DOMAIN        → domain serving the SENDT client   (e.g. chat.example.com)
+#   YOUR_HOMESERVER    → Matrix homeserver domain           (e.g. matrix.example.com)
+#   YOUR_MOODLE_ORIGIN → Moodle instance origin (for CSP)  (e.g. https://moodle.example.com)
+#
+# Key security decisions explained:
+#
+#   X-Frame-Options is intentionally ABSENT.
+#   Frame embedding security is controlled exclusively via CSP frame-ancestors.
+#   Setting both X-Frame-Options and CSP frame-ancestors causes browsers to
+#   apply the more restrictive rule — X-Frame-Options would block the Moodle
+#   iframe even when frame-ancestors allows it.
+#
+#   frame-ancestors includes 'self' and YOUR_MOODLE_ORIGIN so the SENDT client
+#   can be embedded in Moodle pages while being blocked everywhere else.
+#
+#   'wasm-unsafe-eval' in script-src is required for the Olm WebAssembly E2EE
+#   library. Without it the browser blocks WASM JIT compilation.
+#
+#   'unsafe-inline' in script-src is required because the SENDT SPA uses inline
+#   event handlers in the HTML (onclick, onchange, etc.).
+#
+#   nginx add_header inheritance rule: location blocks that define their own
+#   add_header directives do NOT inherit headers from the parent server block.
+#   Security headers must therefore be repeated in every location block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+limit_req_zone $binary_remote_addr zone=livekit_token:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=spa_general:20m  rate=60r/m;
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name YOUR_DOMAIN;
+
+    root  /var/www/html/webphone-pro;
+    index index.html;
+
+    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    access_log /var/log/nginx/webphone-access.log;
+    error_log  /var/log/nginx/webphone-error.log;
+
+    # Block backup files from being served
+    location ~* (-bakup|-bak|\.bak).*\.(js|html|css)$ { deny all; return 404; }
+    location = /index-bakup.html                        { deny all; return 404; }
+
+    # ── LiveKit token API ─────────────────────────────────────────────────────
+    location /api/ {
+        limit_req zone=livekit_token burst=5 nodelay;
+        proxy_pass         http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   Authorization     $http_authorization;
+        proxy_pass_header  Authorization;
+        add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # ── index.html (no cache + full security headers) ─────────────────────────
+    location = /index.html {
+        try_files $uri =404;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Pragma  "no-cache" always;
+        add_header Expires "0"        always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(self), microphone=(self), geolocation=(self), display-capture=(self)" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Content-Security-Policy "
+            default-src 'self';
+            script-src  'self' 'unsafe-inline' 'wasm-unsafe-eval'
+                        https://cdnjs.cloudflare.com
+                        https://cdn.jsdelivr.net
+                        https://unpkg.com;
+            style-src   'self' 'unsafe-inline'
+                        https://cdnjs.cloudflare.com
+                        https://unpkg.com;
+            font-src    'self' https://cdnjs.cloudflare.com;
+            img-src     'self' data: blob: https://YOUR_HOMESERVER https://*.tile.openstreetmap.org;
+            media-src   'self' blob:;
+            connect-src 'self'
+                        https://YOUR_HOMESERVER wss://YOUR_HOMESERVER
+                        https://unpkg.com
+                        https://cdn.jsdelivr.net;
+            worker-src  'self' blob:;
+            frame-ancestors 'self' YOUR_MOODLE_ORIGIN;
+            object-src  'none';
+            base-uri    'self';
+        " always;
+    }
+
+    # ── Static assets (long-lived cache) ─────────────────────────────────────
+    location ~* \.(js|css|woff2?|ttf|svg|png|jpg|webp|mp3|ico|wasm)$ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # ── SPA fallback ─────────────────────────────────────────────────────────
+    location / {
+        limit_req zone=spa_general burst=30 nodelay;
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(self), microphone=(self), geolocation=(self), display-capture=(self)" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Content-Security-Policy "
+            default-src 'self';
+            script-src  'self' 'unsafe-inline' 'wasm-unsafe-eval'
+                        https://cdnjs.cloudflare.com
+                        https://cdn.jsdelivr.net
+                        https://unpkg.com;
+            style-src   'self' 'unsafe-inline'
+                        https://cdnjs.cloudflare.com
+                        https://unpkg.com;
+            font-src    'self' https://cdnjs.cloudflare.com;
+            img-src     'self' data: blob: https://YOUR_HOMESERVER https://*.tile.openstreetmap.org;
+            media-src   'self' blob:;
+            connect-src 'self'
+                        https://YOUR_HOMESERVER wss://YOUR_HOMESERVER
+                        https://unpkg.com
+                        https://cdn.jsdelivr.net;
+            worker-src  'self' blob:;
+            frame-ancestors 'self' YOUR_MOODLE_ORIGIN;
+            object-src  'none';
+            base-uri    'self';
+        " always;
+    }
+}

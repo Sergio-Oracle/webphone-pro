@@ -49,51 +49,89 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('landing-screen')?.classList.add('active');
     } else if (window.location.hash.startsWith('#moodle-sso')) {
         // ── Plugin Moodle SSO ─────────────────────────────────────────────────────
-        // Format: #moodle-sso?token=ACCESS_TOKEN&user=USER_ID&room=ROOM_ID
-        const _moodleParams = new URLSearchParams(window.location.hash.replace('#moodle-sso', '').replace(/^\?/, ''));
+        //
+        // FIX v19.10 — trois corrections critiques par rapport à la version précédente :
+        //
+        // 1. NORMALISATION des séparateurs : Moodle utilise ";" comme séparateur dans
+        //    http_build_query() pour éviter que html_writer encode "&" en "&amp;" dans
+        //    l'attribut src de l'iframe. On normalise ici "&amp;" et ";" en "&" avant
+        //    le parsing URLSearchParams. Sans ça, les params user= et room= sont null.
+        //
+        // 2. HOMESERVER UNIVERSEL : l'ancienne version utilisait CONFIG.DEFAULT_HOMESERVER
+        //    (valeur fixe). On extrait maintenant le domaine directement depuis le user ID
+        //    Matrix (@user:domaine.com) → fonctionne sur n'importe quel déploiement.
+        //
+        // 3. FLAG _moodleSSOActive : checkSavedCredentials() s'exécute après le if/else
+        //    et peut tenter une connexion simultanée. Le flag bloque ce comportement
+        //    pendant que le login SSO asynchrone est en cours.
+        //
+        // Format URL: #moodle-sso?token=ACCESS_TOKEN;user=@x:server;room=!r:server
+        const _rawHash = window.location.hash
+            .replace('#moodle-sso', '')
+            .replace(/^\?/, '')
+            .replace(/&amp;/g, '&')
+            .replace(/;/g, '&');
+        const _moodleParams = new URLSearchParams(_rawHash);
         const _moodleToken  = _moodleParams.get('token');
         const _moodleUser   = _moodleParams.get('user');
         const _moodleRoom   = _moodleParams.get('room');
         history.replaceState(null, '', window.location.pathname);
 
         if (_moodleToken && _moodleUser) {
-            // Show loading screen immediately
-            const _lds = document.getElementById('loading-screen');
-            const _lsub = _lds?.querySelector('.sendt-subtitle');
-            if (_lds) _lds.classList.add('active');
-            if (_lsub) _lsub.textContent = 'Connexion depuis Moodle...';
+            // Extraire le homeserver depuis le user ID (@localpart:domaine)
+            // → pas de dépendance à CONFIG.DEFAULT_HOMESERVER, universel.
+            const _domainMatch = _moodleUser.match(/:([^:]+)$/);
+            const _domain      = _domainMatch ? _domainMatch[1] : null;
+            const _homeserver  = (typeof CONFIG !== 'undefined' && CONFIG.MATRIX_HOMESERVER_URL)
+                ? CONFIG.MATRIX_HOMESERVER_URL
+                : (_domain ? 'https://' + _domain : '');
 
-            uiController.init();
+            if (!_homeserver) {
+                document.getElementById('landing-screen')?.classList.add('active');
+            } else {
+                // Device ID stable — même formule que le PHP (lib.php côté Moodle)
+                const _tag      = _moodleUser.replace(/[^A-Z0-9]/gi,'').substring(0,8).toUpperCase();
+                const _deviceId = 'MOODLE_' + _tag;
 
-            (async () => {
-                const r = await matrixManager.loginWithToken(CONFIG.DEFAULT_HOMESERVER, _moodleUser, _moodleToken);
-                if (r.success) {
-                    const p = matrixManager.getUserProfile();
-                    uiController.updateUserProfile(r.userId, p.displayname || _moodleUser);
-                    uiController._updateSidebarAvatar?.();
-                    if (_lsub) _lsub.textContent = 'Bienvenue !';
-                    setTimeout(async () => {
+                // Bloquer checkSavedCredentials() pendant le login SSO asynchrone
+                window._moodleSSOActive = true;
+
+                const _lds  = document.getElementById('loading-screen');
+                const _lsub = _lds?.querySelector('.sendt-subtitle');
+                if (_lds)  _lds.classList.add('active');
+                if (_lsub) _lsub.textContent = 'Connexion depuis Moodle...';
+
+                uiController.init();
+
+                (async () => {
+                    const r = await matrixManager.loginWithToken(_homeserver, _moodleUser, _moodleToken, _deviceId);
+                    window._moodleSSOActive = false;
+                    if (r.success) {
+                        const p = matrixManager.getUserProfile();
+                        uiController.updateUserProfile(r.userId, p.displayname || _moodleUser);
+                        uiController._updateSidebarAvatar?.();
+                        if (_lsub) _lsub.textContent = 'Bienvenue !';
+                        setTimeout(async () => {
+                            if (_lds) _lds.classList.remove('active');
+                            document.getElementById('app-screen')?.classList.add('active');
+                            isLoggedIn = true;
+                            _initE2EEAfterLogin?.();
+                            if (_moodleRoom) {
+                                setTimeout(() => {
+                                    try { uiController.selectGroup(_moodleRoom); }
+                                    catch(e) { console.warn('[Moodle SSO] selectGroup failed:', e); }
+                                }, 1200);
+                            }
+                        }, 300);
+                    } else {
                         if (_lds) _lds.classList.remove('active');
-                        document.getElementById('app-screen')?.classList.add('active');
-                        isLoggedIn = true;
-                        _initE2EEAfterLogin?.();
-                        // Auto-navigate to the Moodle room if provided
-                        if (_moodleRoom) {
-                            setTimeout(() => {
-                                try { uiController.selectGroup(_moodleRoom); }
-                                catch(e) { console.warn('[Moodle SSO] selectGroup failed:', e); }
-                            }, 1200);
-                        }
-                    }, 300);
-                } else {
-                    if (_lds) _lds.classList.remove('active');
-                    document.getElementById('landing-screen')?.classList.add('active');
-                    console.error('[Moodle SSO] Echec autologin:', r.error);
-                    showToast('Connexion automatique echouee. Connectez-vous manuellement.', 'error');
-                }
-            })();
-            checkSavedCredentials();
-            return; // Skip uiController.init() below (already called)
+                        document.getElementById('landing-screen')?.classList.add('active');
+                        console.error('[Moodle SSO] Echec autologin:', r.error);
+                        showToast('Connexion automatique echouée. Connectez-vous manuellement.', 'error');
+                    }
+                })();
+                return; // uiController.init() already called above
+            }
         } else {
             document.getElementById('landing-screen')?.classList.add('active');
         }
