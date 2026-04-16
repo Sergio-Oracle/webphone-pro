@@ -13,7 +13,7 @@
           integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g" crossorigin="anonymous">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
           integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
-    <link rel="stylesheet" href="css/style.css?v=19.8">
+    <link rel="stylesheet" href="css/style.css?v=19.9">
     <style>
         /* E2EE — Cadenas dans l'en-tête de conversation */
         .e2ee-lock { font-size:.72rem; color:#25D366; margin-left:5px; vertical-align:middle; cursor:help; }
@@ -980,7 +980,7 @@
         <div class="settings-tabs">
             <button class="settings-tab active" data-tab="devices" onclick="uiController.switchSettingsTab('devices')">Appareils</button>
             <button class="settings-tab" data-tab="sounds" onclick="uiController.switchSettingsTab('sounds')">Sons</button>
-            <button class="settings-tab" data-tab="account" onclick="uiController.switchSettingsTab('account');loadAccountEmail();loadConnectedDevices()">Compte</button>
+            <button class="settings-tab" data-tab="account" onclick="uiController.switchSettingsTab('account');loadAccountEmail();loadConnectedDevices();loadAccessToken()">Compte</button>
             <button class="settings-tab" data-tab="security" onclick="uiController.switchSettingsTab('security');loadSecuritySettings()"><i class="fas fa-shield-alt" style="margin-right:4px"></i>Sécurité</button>
         </div>
         <div id="devices-panel" class="settings-panel active">
@@ -1046,6 +1046,40 @@
                 <p style="color:#8696A0;font-size:.78rem;line-height:1.5;margin-bottom:10px;">Tous les appareils où votre compte est actif. Déconnectez ceux que vous ne reconnaissez pas.</p>
                 <div id="connected-devices-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
                     <div style="color:#8696A0;font-size:.82rem;text-align:center;padding:10px;"><i class="fas fa-spinner fa-spin"></i> Chargement...</div>
+                </div>
+            </div>
+
+            <!-- Token d'accès -->
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid rgba(255,255,255,.07);">
+                <h4 style="color:#E9EDEF;margin:0 0 8px;font-size:.93rem;font-weight:600;display:flex;align-items:center;gap:8px;">
+                    <i class="fas fa-key" style="color:#00853F"></i> Token d'accès
+                </h4>
+                <p style="color:#8696A0;font-size:.82rem;line-height:1.55;margin-bottom:12px;">
+                    Token de session courant. Utilisez-le pour des intégrations API ou outils tiers Matrix.
+                </p>
+                <div style="position:relative;margin-bottom:10px;">
+                    <input type="password" id="access-token-field" readonly
+                        style="width:100%;box-sizing:border-box;background:#1A2530;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:10px 80px 10px 12px;color:#E9EDEF;font-family:monospace;font-size:.76rem;outline:none;"
+                        placeholder="Cliquez sur « Afficher » pour charger le token">
+                    <button type="button" onclick="toggleTokenVisibility()" id="token-toggle-btn"
+                        style="position:absolute;right:40px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8696A0;cursor:pointer;padding:4px;" title="Afficher/Masquer">
+                        <i class="fas fa-eye" id="token-eye-icon"></i>
+                    </button>
+                    <button type="button" onclick="copyAccessToken()"
+                        style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#00853F;cursor:pointer;padding:4px;" title="Copier le token">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <!-- Commande curl équivalente -->
+                <div style="background:#0D1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px 36px 12px 12px;position:relative;">
+                    <div style="font-size:.68rem;color:#8696A0;margin-bottom:5px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;">
+                        <i class="fas fa-terminal" style="margin-right:5px;"></i>Commande pour générer un token
+                    </div>
+                    <code id="token-curl-cmd" style="font-size:.72rem;color:#58A6FF;word-break:break-all;line-height:1.65;display:block;white-space:pre-wrap;"></code>
+                    <button type="button" onclick="copyCurlCommand()"
+                        style="position:absolute;top:8px;right:8px;background:none;border:none;color:#8696A0;cursor:pointer;font-size:.8rem;padding:4px;" title="Copier la commande">
+                        <i class="fas fa-copy"></i>
+                    </button>
                 </div>
             </div>
 
@@ -1404,7 +1438,7 @@
 <!-- defer : téléchargement parallèle, exécution dans l'ordre après le parsing HTML (améliore FCP) -->
 <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
-<script defer src="js/browser-matrix.min.js?v=19.8"
+<script defer src="js/browser-matrix.min.js?v=19.9"
         integrity="sha384-bKCqbmbZQrhDkyovaon2gGvpf5eQBmLUv4V6hOMmlYgPx08CPdiTyOYxtKdo49Wx" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"
         integrity="sha384-8MchKu+uhKf1LR8KGk472KudVHw8lg9vmXj/XW6mPzWLSXlVTlnW/+oJixUtGYbX" crossorigin="anonymous"></script>
@@ -1412,11 +1446,11 @@
     ✅ jose SUPPRIMÉ : était en ESModule (export) → "Unexpected token 'export'"
     La génération JWT LiveKit est faite nativement via crypto.subtle dans webrtc-manager.js
 -->
-<script defer src="js/config.js?v=19.8"></script>
-<script defer src="js/utils.js?v=19.8"></script>
-<script defer src="js/matrix-client.js?v=19.8"></script>
-<script defer src="js/webrtc-manager.js?v=19.8"></script>
-<script defer src="js/ui-controller.js?v=19.8"></script>
-<script defer src="js/app.js?v=19.8"></script>
+<script defer src="js/config.js?v=19.9"></script>
+<script defer src="js/utils.js?v=19.9"></script>
+<script defer src="js/matrix-client.js?v=19.9"></script>
+<script defer src="js/webrtc-manager.js?v=19.9"></script>
+<script defer src="js/ui-controller.js?v=19.9"></script>
+<script defer src="js/app.js?v=19.9"></script>
 </body>
 </html>

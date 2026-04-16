@@ -80,6 +80,48 @@ class MatrixManager {
         }
     }
 
+
+    // ── Connexion par token SSO (plugin Moodle) ─────────────────────────────────
+    async loginWithToken(homeserverUrl, userId, accessToken) {
+        try {
+            const sdk = this._getSDK();
+            if (!sdk) throw new Error("Matrix SDK non charge");
+            this.homeserverUrl = homeserverUrl;
+            this.userId        = userId;
+            this.accessToken   = accessToken;
+            const tag          = userId.replace(/[^A-Z0-9]/gi,"").substring(0,8).toUpperCase();
+            const deviceId     = "MOODLE_" + tag + "_" + Date.now().toString(36).toUpperCase();
+
+            let mainStore;
+            try {
+                mainStore = new sdk.IndexedDBStore({
+                    indexedDB: window.indexedDB,
+                    dbName: "sendt-store-" + this.userId,
+                    workerSupport: false
+                });
+                await mainStore.startup();
+            } catch(e) { mainStore = undefined; }
+
+            const cryptoStore = sdk.IndexedDBCryptoStore
+                ? new sdk.IndexedDBCryptoStore(window.indexedDB, "sendt:crypto")
+                : undefined;
+
+            this.client = sdk.createClient({
+                baseUrl: homeserverUrl, accessToken: this.accessToken,
+                userId: this.userId, deviceId, timelineSupport: true,
+                ...(mainStore   ? { store: mainStore } : {}),
+                ...(cryptoStore ? { cryptoStore }      : {}),
+            });
+
+            await this._initCrypto();
+            try { const p = await this.client.getProfileInfo(this.userId); this._profile = p || {}; } catch(e) {}
+            await this.startSync();
+            return { success: true, userId: this.userId };
+        } catch(e) {
+            return { success: false, error: e.message || "Erreur SSO Moodle" };
+        }
+    }
+
     // ── Initialisation E2EE exactement comme Element ────────────────────────────
     // Priorité : Rust Crypto (moderne, pas besoin d'Olm) → Olm Legacy → désactivé
     async _initCrypto() {

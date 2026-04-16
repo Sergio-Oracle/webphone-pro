@@ -47,6 +47,56 @@ document.addEventListener('DOMContentLoaded', () => {
         history.replaceState(null, '', window.location.pathname);
         sessionStorage.setItem('_pendingEmailConfirm', '1');
         document.getElementById('landing-screen')?.classList.add('active');
+    } else if (window.location.hash.startsWith('#moodle-sso')) {
+        // ── Plugin Moodle SSO ─────────────────────────────────────────────────────
+        // Format: #moodle-sso?token=ACCESS_TOKEN&user=USER_ID&room=ROOM_ID
+        const _moodleParams = new URLSearchParams(window.location.hash.replace('#moodle-sso', '').replace(/^\?/, ''));
+        const _moodleToken  = _moodleParams.get('token');
+        const _moodleUser   = _moodleParams.get('user');
+        const _moodleRoom   = _moodleParams.get('room');
+        history.replaceState(null, '', window.location.pathname);
+
+        if (_moodleToken && _moodleUser) {
+            // Show loading screen immediately
+            const _lds = document.getElementById('loading-screen');
+            const _lsub = _lds?.querySelector('.sendt-subtitle');
+            if (_lds) _lds.classList.add('active');
+            if (_lsub) _lsub.textContent = 'Connexion depuis Moodle...';
+
+            uiController.init();
+
+            (async () => {
+                const r = await matrixManager.loginWithToken(CONFIG.DEFAULT_HOMESERVER, _moodleUser, _moodleToken);
+                if (r.success) {
+                    const p = matrixManager.getUserProfile();
+                    uiController.updateUserProfile(r.userId, p.displayname || _moodleUser);
+                    uiController._updateSidebarAvatar?.();
+                    if (_lsub) _lsub.textContent = 'Bienvenue !';
+                    setTimeout(async () => {
+                        if (_lds) _lds.classList.remove('active');
+                        document.getElementById('app-screen')?.classList.add('active');
+                        isLoggedIn = true;
+                        _initE2EEAfterLogin?.();
+                        // Auto-navigate to the Moodle room if provided
+                        if (_moodleRoom) {
+                            setTimeout(() => {
+                                try { uiController.selectGroup(_moodleRoom); }
+                                catch(e) { console.warn('[Moodle SSO] selectGroup failed:', e); }
+                            }, 1200);
+                        }
+                    }, 300);
+                } else {
+                    if (_lds) _lds.classList.remove('active');
+                    document.getElementById('landing-screen')?.classList.add('active');
+                    console.error('[Moodle SSO] Echec autologin:', r.error);
+                    showToast('Connexion automatique echouee. Connectez-vous manuellement.', 'error');
+                }
+            })();
+            checkSavedCredentials();
+            return; // Skip uiController.init() below (already called)
+        } else {
+            document.getElementById('landing-screen')?.classList.add('active');
+        }
     } else {
         document.getElementById('landing-screen')?.classList.add('active');
     }
@@ -456,6 +506,74 @@ async function logoutAllDevices() {
         showToast(result.error, 'error');
     }
 }
+
+// ── Token d'accès ─────────────────────────────────────────────────────────────
+function loadAccessToken() {
+    const field = document.getElementById('access-token-field');
+    const curlEl = document.getElementById('token-curl-cmd');
+    if (!field) return;
+    const token = matrixManager?.accessToken;
+    if (token) {
+        field.value = token;
+        field.type = 'password';
+        const icon = document.getElementById('token-eye-icon');
+        if (icon) icon.className = 'fas fa-eye';
+    } else {
+        field.value = '';
+        field.placeholder = 'Non disponible — connectez-vous d\'abord';
+    }
+    if (curlEl) {
+        const hs = matrixManager?.homeserverUrl || CONFIG?.DEFAULT_HOMESERVER || 'https://matrix.exemple.com';
+        const userId = matrixManager?.userId || 'votre_identifiant';
+        curlEl.textContent =
+            `curl -X POST ${hs}/_matrix/client/v3/login \\\n` +
+            `  -H "Content-Type: application/json" \\\n` +
+            `  -d '{"type":"m.login.password","user":"${userId}","password":"VOTRE_MOT_DE_PASSE"}'`;
+    }
+}
+
+function toggleTokenVisibility() {
+    const field = document.getElementById('access-token-field');
+    const icon  = document.getElementById('token-eye-icon');
+    if (!field) return;
+    if (field.type === 'password') {
+        field.type = 'text';
+        if (icon) icon.className = 'fas fa-eye-slash';
+    } else {
+        field.type = 'password';
+        if (icon) icon.className = 'fas fa-eye';
+    }
+}
+
+async function copyAccessToken() {
+    const field = document.getElementById('access-token-field');
+    const token = field?.value || matrixManager?.accessToken;
+    if (!token) { showToast('Token non disponible', 'error'); return; }
+    try {
+        await navigator.clipboard.writeText(token);
+        showToast('✅ Token copié dans le presse-papier', 'success');
+    } catch(e) {
+        // Fallback pour les contextes sans clipboard API
+        const prev = field.type;
+        field.type = 'text';
+        field.select();
+        document.execCommand('copy');
+        field.type = prev;
+        showToast('✅ Token copié', 'success');
+    }
+}
+
+async function copyCurlCommand() {
+    const el = document.getElementById('token-curl-cmd');
+    if (!el?.textContent) return;
+    try {
+        await navigator.clipboard.writeText(el.textContent);
+        showToast('✅ Commande copiée', 'success');
+    } catch(e) {
+        showToast('Erreur lors de la copie', 'error');
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 function switchTab(tabName) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
