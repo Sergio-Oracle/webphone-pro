@@ -1,30 +1,39 @@
-# SENDT Webphone Pro + Intégration Moodle (mod_matrix)
+# SENDT Webphone Pro
 
-Client web Matrix (SENDT) avec intégration SSO complète dans Moodle via le plugin **mod_matrix**.
+Client web Matrix avec intégration SSO complète dans Moodle via le plugin **[mod_matrix](https://github.com/Sergio-Oracle/moodle-mod-matrix)**.
 
 ---
 
-## Contenu du dépôt
+## Dépôts liés
+
+| Dépôt | Rôle |
+|---|---|
+| **ce dépôt** — `webphone-pro` | Client SENDT (interface web, WebRTC, Matrix SDK) |
+| **[moodle-mod-matrix](https://github.com/Sergio-Oracle/moodle-mod-matrix)** | Plugin Moodle `mod_matrix` v1.1.0 (SSO, activité Chat Matrix) |
+
+---
+
+## Structure
 
 ```
 webphone-pro/
-├── css/                        Client SENDT — styles
+├── css/                        Styles du client SENDT
 ├── js/
-│   ├── app.js                  Application principale (inclut handler SSO Moodle)
-│   ├── matrix-client.js        Wrapper Matrix SDK (inclut loginWithToken pour SSO)
+│   ├── app.js                  Application principale (handler SSO Moodle)
+│   ├── matrix-client.js        Wrapper Matrix SDK (loginWithToken pour SSO)
 │   ├── ui-controller.js        Contrôleur d'interface
 │   ├── webrtc-manager.js       Appels WebRTC / LiveKit
 │   ├── utils.js                Utilitaires
 │   ├── config.js               Configuration (homeserver, LiveKit, etc.)
 │   └── browser-matrix.min.js  Matrix JS SDK (bundle)
-├── moodle-plugin/
-│   └── matrix/                 Plugin Moodle mod_matrix v1.1.0 (ZIP-installable)
 ├── deploy/
 │   ├── nginx/
-│   │   └── webphone-pro.conf.example   Config nginx complète (voir ci-dessous)
+│   │   └── webphone-pro.conf.example   Config nginx complète
 │   ├── configs/
 │   │   └── homeserver.yaml.template    Template Synapse
 │   └── install.sh              Script d'installation serveur
+├── icons/                      Icônes PWA
+├── sounds/                     Sonneries
 ├── index.html
 └── vendor/                     Olm WASM (E2EE)
 ```
@@ -58,38 +67,20 @@ webphone-pro/
 
 ---
 
-## Plugin Moodle — mod_matrix v1.1.0
+## Plugin Moodle
 
-### Installation
+Le plugin `mod_matrix` est désormais maintenu dans son propre dépôt :  
+**→ [github.com/Sergio-Oracle/moodle-mod-matrix](https://github.com/Sergio-Oracle/moodle-mod-matrix)**
 
-1. Générer le ZIP :
-   ```bash
-   cd moodle-plugin && zip -r ../mod_matrix.zip matrix/
-   ```
-2. Dans Moodle : **Administration du site → Plugins → Installer un plugin** → uploader le ZIP
-
-### Configuration (Administration → Plugins → Chat Matrix)
-
-| Paramètre | Description | Exemple |
-|---|---|---|
-| URL du serveur Matrix | URL base du homeserver Synapse | `https://matrix.example.com` |
-| Domaine du serveur | Utilisé dans les IDs et alias | `example.com` |
-| URL du client Matrix | URL de cette application SENDT | `https://chat.example.com` |
-| Token admin | Token d'un compte admin Synapse | `syt_…` |
-| Durée du token SSO | Validité des tokens générés | 8 heures (recommandé) |
-| Vérifier SSL | Désactiver uniquement en dev | activé |
-
-Après configuration, cliquer **"Lancer les diagnostics"** pour valider la connexion.
-
-### Obtenir le token admin Synapse
+### Installation rapide
 
 ```bash
-curl -X POST https://matrix.example.com/_matrix/client/v3/login \
-  -H "Content-Type: application/json" \
-  -d '{"type":"m.login.password","user":"@admin:example.com","password":"MOT_DE_PASSE"}'
+git clone https://github.com/Sergio-Oracle/moodle-mod-matrix.git
+cd moodle-mod-matrix
+zip -r mod_matrix.zip matrix/   # ou zipper le contenu de ce dépôt directement
 ```
 
-Récupérer la valeur `access_token` dans la réponse.
+Puis dans Moodle : **Administration du site → Plugins → Installer un plugin** → uploader le ZIP.
 
 ---
 
@@ -116,7 +107,7 @@ Copier `deploy/nginx/webphone-pro.conf.example` dans `/etc/nginx/sites-available
 
 #### `js/app.js` — Handler SSO Moodle
 
-**Bug 1 — `&amp;` dans l'URL du hash**
+**Bug 1 — `&amp;` dans l'URL du hash**  
 Moodle's `html_writer::tag()` encode `&` en `&amp;` dans les attributs HTML (`src` de l'iframe).
 Le navigateur conserve `&amp;` littéralement dans le fragment. `URLSearchParams` ne trouve pas
 `user=` et `room=` → l'utilisateur voit la page de login au lieu du chat.
@@ -127,7 +118,7 @@ const _rawHash = hash.replace(/&amp;/g, '&').replace(/;/g, '&');
 const params   = new URLSearchParams(_rawHash);
 ```
 
-**Bug 2 — Homeserver hardcodé**
+**Bug 2 — Homeserver hardcodé**  
 Utilisait `CONFIG.DEFAULT_HOMESERVER`, fixe par déploiement.
 
 **Fix :** extraction depuis le user ID Matrix :
@@ -136,7 +127,7 @@ const domain     = userId.match(/:([^:]+)$/)?.[1];
 const homeserver = CONFIG.MATRIX_HOMESERVER_URL || ('https://' + domain);
 ```
 
-**Bug 3 — Race condition `checkSavedCredentials()`**
+**Bug 3 — Race condition `checkSavedCredentials()`**  
 S'exécutait en parallèle du login SSO asynchrone.
 
 **Fix :** flag `window._moodleSSOActive = true` pendant le login.
@@ -145,40 +136,20 @@ S'exécutait en parallèle du login SSO asynchrone.
 
 #### `js/matrix-client.js` — `loginWithToken()`
 
-**Bug 1 — device_id instable**
+**Bug 1 — device_id instable**  
 Générait `"MOODLE_" + tag + "_" + Date.now()` → nouveau device à chaque connexion,
 accumulation de devices, erreurs E2EE.
 
-**Fix :** device_id stable identique au PHP :
+**Fix :** device_id stable :
 ```javascript
-// JS                                   // PHP (lib.php)
-"MOODLE_" + userId                      'MOODLE_' . substr($tag, 0, 8)
-  .replace(/[^A-Z0-9]/gi,'')
-  .substring(0,8).toUpperCase()
+"MOODLE_" + userId.replace(/[^A-Z0-9]/gi,'').substring(0,8).toUpperCase()
 ```
 
-**Bug 2 — E2EE activé → erreur 400 `keys/upload`**
+**Bug 2 — E2EE activé → erreur 400 `keys/upload`**  
 Les tokens admin Synapse n'ont pas de contexte `device_id` dans l'auth Synapse.
-`_initCrypto()` → `keys/upload` → `400 "must pass device_id"`.
 
-**Fix :** `this.cryptoEnabled = false` pour les sessions SSO.
+**Fix :** `this.cryptoEnabled = false` pour les sessions SSO.  
 Les messages restent protégés par TLS. L'E2EE manuel reste disponible hors SSO.
-
----
-
-#### `moodle-plugin/matrix/` — Plugin mod_matrix v1.1.0 (nouveau)
-
-Plugin Moodle complet. Voir `moodle-plugin/matrix/` pour le code source.
-
-Fonctionnalités principales :
-- SSO automatique via token Synapse (8h, configurable)
-- Force-join sans invitation à accepter
-- Création automatique de salons Matrix
-- Timer JS : refresh iframe 5 min avant expiration du token
-- `allow_iframe` : fallback automatique en mode "nouvelle fenêtre"
-- SSL verify, timeout API configurables par l'admin
-- Page de diagnostics (4 tests en direct)
-- 0 URL/domaine hardcodé — fonctionne sur n'importe quel déploiement Moodle
 
 ---
 
